@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 COPY package.json package-lock.json ./
+COPY download-font.js build-whisper.js ./
 RUN npm ci
 
 COPY . .
