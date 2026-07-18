@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     python3 \
     git \
+    wget \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -14,6 +16,10 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY download-font.js build-whisper.js ./
 RUN npm ci
+
+# Pre-download the Whisper base model to avoid runtime downloading issues
+RUN cd node_modules/nodejs-whisper/cpp/whisper.cpp/models && sh ./download-ggml-model.sh base
+
 
 COPY . .
 
