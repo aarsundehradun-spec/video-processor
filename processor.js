@@ -1,0 +1,755 @@
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const { execFile, spawn } = require('child_process');
+const { nodewhisper } = require('nodejs-whisper');
+const ffmpeg = require('fluent-ffmpeg');
+const ffmpegStatic = require('./ffmpeg-path');
+const ffprobeStaticPath = require('./ffprobe-path');
+
+// Point fluent-ffmpeg to the custom bundled binary if available, or static fallback
+ffmpeg.setFfmpegPath(ffmpegStatic);
+ffmpeg.setFfprobePath(ffprobeStaticPath);
+
+// ---------------------------------------------------------------------------
+// Hardware encoder detection — runs ONCE at startup, result cached as a Promise.
+// Subsequent callers await the same Promise (no extra spawns).
+// ---------------------------------------------------------------------------
+const hwEncoderCache = new Promise((resolve) => {
+  execFile(ffmpegStatic, ['-encoders', '-hide_banner'], (err, stdout) => {
+    if (err) return resolve({ nvenc: false, vaapi: false });
+    resolve({
+      nvenc: /h264_nvenc/.test(stdout),
+      vaapi: /h264_vaapi/.test(stdout),
+    });
+  });
+});
+
+const filterCache = new Promise((resolve) => {
+  execFile(ffmpegStatic, ['-filters', '-hide_banner'], (err, stdout) => {
+    if (err) return resolve({ drawtext: false });
+    resolve({
+      drawtext: /drawtext/.test(stdout),
+    });
+  });
+});
+// Kick off detection immediately (so it's warm before the first job arrives)
+hwEncoderCache.then((hw) => {
+  if (hw.nvenc)  console.log('[Processor] Detected GPU encoder: h264_nvenc');
+  else if (hw.vaapi) console.log('[Processor] Detected GPU encoder: h264_vaapi');
+  else           console.log('[Processor] No GPU encoder found — using libx264 ultrafast');
+});
+
+// ---------------------------------------------------------------------------
+// Shared helpers: build metadata arg pairs + apply them safely to fluent-ffmpeg.
+// ---------------------------------------------------------------------------
+// buildMetaArgs returns an array of ['-metadata', 'key=value'] pairs.
+// Callers must use applyMetaArgs() — NOT .outputOptions(flat array) — because
+// fluent-ffmpeg's .outputOptions(array) auto-splits any element that contains
+// exactly ONE space (line 113-116 of fluent-ffmpeg/lib/options/custom.js):
+//
+//   var split = String(option).split(' ');
+//   if (doSplit && split.length === 2) options.push(split[0], split[1]);
+//
+// This means `title=1sst part` gets split into ['title=1sst', 'part'], where
+// 'part' is then treated by FFmpeg as an output file path → exit code 234.
+// Calling .outputOptions('-metadata', 'key=value') with TWO arguments sets
+// doSplit=false, bypassing the split entirely.
+function buildMetaArgs(meta = {}) {
+  const {
+    title = '',
+    author = '',
+    comment = '',
+    copyright = '',
+    creationTime = '',
+  } = meta;
+
+  let isoTime = '';
+  if (creationTime) {
+    try { isoTime = new Date(creationTime).toISOString(); } catch { /* ignore bad dates */ }
+  }
+
+  // Returns nested pairs: [['-metadata', 'title=…'], ['-metadata', 'artist=…'], …]
+  return [
+    ['-metadata', `title=${title}`],
+    ['-metadata', `artist=${author}`],
+    ['-metadata', `author=${author}`],
+    ['-metadata', `album_artist=${author}`],
+    ['-metadata', `comment=${comment}`],
+    ['-metadata', `copyright=${copyright}`],
+    ['-metadata', 'description='],
+    ['-metadata', 'synopsis='],
+    ['-metadata', 'show='],
+    ['-metadata', 'episode_id='],
+    ['-metadata', 'network='],
+    ['-metadata', 'lyrics='],
+    ['-metadata', 'encoder='],
+    ['-metadata', 'encoded_by='],
+    ['-metadata', 'album='],
+    ['-metadata', 'genre='],
+    ['-metadata', 'composer='],
+    ['-metadata', 'performer='],
+    ['-metadata', 'disc='],
+    ['-metadata', 'track='],
+    ['-metadata', 'make='],
+    ['-metadata', 'model='],
+    ['-metadata', 'software='],
+    ['-metadata', 'firmware='],
+    ['-metadata', 'camera_make='],
+    ['-metadata', 'camera_model='],
+    ['-metadata', 'location='],
+    ['-metadata', 'location-eng='],
+    ['-metadata', 'com.apple.quicktime.location.accuracy.horizontal='],
+    ['-metadata', 'com.apple.quicktime.make='],
+    ['-metadata', 'com.apple.quicktime.model='],
+    ['-metadata', 'com.apple.quicktime.software='],
+    ['-metadata', 'com.apple.quicktime.creationdate='],
+    ['-metadata', `creation_time=${isoTime}`],
+  ];
+}
+
+// Apply metadata pairs to a fluent-ffmpeg command.
+// Each pair is passed as two separate arguments → doSplit=false in fluent-ffmpeg.
+function applyMetaArgs(cmd, metaArgs) {
+  for (const [flag, value] of metaArgs) {
+    cmd.outputOptions(flag, value);
+  }
+  return cmd;
+}
+
+// ---------------------------------------------------------------------------
+// JPEG metadata stripping (binary manipulation — fully async, non-blocking)
+// ---------------------------------------------------------------------------
+async function stripJpegMetadata(inputPath, outputPath) {
+  // Fix: use async fs to avoid blocking the Node.js event loop
+  const data = await fs.promises.readFile(inputPath);
+
+  if (data[0] !== 0xFF || data[1] !== 0xD8) {
+    await fs.promises.copyFile(inputPath, outputPath);
+    return;
+  }
+
+  const chunks = [Buffer.from([0xFF, 0xD8])];
+  let i = 2;
+
+  while (i < data.length) {
+    if (data[i] !== 0xFF) break;
+    const marker = data[i + 1];
+    const isMetadataSegment = marker >= 0xE1 && marker <= 0xEF;
+
+    if (isMetadataSegment) {
+      const segmentLength = (data[i + 2] << 8) | data[i + 3];
+      i += 2 + segmentLength;
+    } else if (marker === 0xDA) {
+      chunks.push(data.slice(i));
+      break;
+    } else {
+      const segmentLength = marker === 0xD9 ? 0 : (data[i + 2] << 8) | data[i + 3];
+      chunks.push(data.slice(i, i + 2 + segmentLength));
+      i += 2 + segmentLength;
+    }
+  }
+
+  await fs.promises.writeFile(outputPath, Buffer.concat(chunks));
+  console.log(`[Processor] JPEG metadata stripped: ${path.basename(outputPath)}`);
+}
+
+// ---------------------------------------------------------------------------
+// VIDEO metadata replacement via FFmpeg — FAST stream-copy mode
+//
+// Apple MOV files (iPhone etc.) contain MULTIPLE embedded metadata tracks:
+//   - Standard QuickTime udta box  → removed by -map_metadata -1
+//   - Apple mebx tracks (stream type 'data') → MUST be dropped via -map 0:v -map 0:a
+//     These carry: camera model, GPS, lens info, iPhone maker notes, etc.
+//
+// This function:
+//   1. Strips ALL original metadata (-map_metadata -1)
+//   2. Explicitly selects ONLY video + audio streams, dropping all data/mebx tracks
+//   3. Injects clean user-supplied metadata fields
+//   4. Stream-copies (no re-encoding) → fast, zero quality loss
+// ---------------------------------------------------------------------------
+// Map output extension to an explicit FFmpeg format name.
+// This prevents FFmpeg from guessing the muxer from the INPUT file extension
+// (e.g. uuid.part triggering the 'part' pseudo-muxer and crashing).
+const EXT_TO_FORMAT = {
+  '.mp4': 'mp4', '.m4v': 'mp4', '.mov': 'mov', '.avi': 'avi',
+  '.mkv': 'matroska', '.webm': 'webm', '.flv': 'flv', '.wmv': 'asf',
+  '.3gp': '3gp',
+};
+
+function replaceVideoMetadata(inputPath, outputPath, customMeta, updateProgress, outputExt) {
+  return new Promise((resolve, reject) => {
+    const useFaststart = outputExt === '.mp4' || outputExt === '.m4v';
+    const metaArgs = buildMetaArgs(customMeta);
+    let lastProgress = 0;
+
+    const cmd = ffmpeg(inputPath)
+      .outputOptions('-map_metadata', '-1')
+      .outputOptions('-map', '0:v?', '-map', '0:a?')
+      .outputOptions('-dn')
+      .outputOptions('-max_muxing_queue_size', '9999');
+
+    // Apply metadata pairs safely (no auto-split on spaces)
+    applyMetaArgs(cmd, metaArgs);
+
+    cmd
+      .videoCodec('copy')
+      .audioCodec('copy');
+
+    // Explicitly declare output format — prevents FFmpeg from guessing muxer
+    // from the input extension (e.g. .part files triggering the wrong muxer)
+    const fmt = EXT_TO_FORMAT[outputExt];
+    if (fmt) cmd.outputOptions('-f', fmt);
+
+    if (useFaststart) cmd.outputOptions('-movflags', '+faststart');
+
+    cmd
+      .output(outputPath)
+      .on('start', (c) => {
+        console.log('[Processor] FFmpeg metadata command:', c);
+        if (updateProgress) updateProgress(5);
+      })
+      .on('progress', (info) => {
+        const pct = Math.min(Math.round(info.percent || 0), 95);
+        if (pct > lastProgress) {
+          lastProgress = pct;
+          if (updateProgress) updateProgress(pct);
+        }
+      })
+      .on('end', () => {
+        console.log(`[Processor] Video metadata replaced: ${path.basename(outputPath)}`);
+        if (updateProgress) updateProgress(100);
+        resolve(outputPath);
+      })
+      .on('error', (err) => {
+        console.error('[Processor] FFmpeg error:', err.message);
+        reject(err);
+      })
+      .run();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// VIDEO TRANSFORM — Full re-encode with all transformations
+//
+// Applies in order:
+//   1. Trim (start/end)
+//   2. Dimension changes (cinematic bars, vertical, crop)
+//   3. Speed adjustment (setpts + atempo)
+//   4. Color grading (eq filter)
+//   5. Caption burn-in (drawtext)
+//   6. Audio mixing (amix with optional external audio)
+//   7. Metadata scrub (always, same as metadata mode)
+// ---------------------------------------------------------------------------
+const util = require('util');
+const ffprobeAsync = util.promisify(ffmpeg.ffprobe);
+
+async function transformVideo(inputPath, outputPath, options, updateProgress, cachedProbe) {
+  // Fix: reuse the ffprobe result from processFile — no second probe spawn
+  let hasOriginalVideo = true;
+  let hasOriginalAudio = true;
+  let videoWidth = 0;
+  try {
+    const probe = cachedProbe || (await ffprobeAsync(inputPath));
+    if (probe && probe.streams) {
+      hasOriginalVideo = probe.streams.some(s => s.codec_type === 'video');
+      hasOriginalAudio = probe.streams.some(s => s.codec_type === 'audio');
+      const vStream = probe.streams.find(s => s.codec_type === 'video');
+      if (vStream) videoWidth = vStream.width || 0;
+    }
+  } catch (e) {
+    console.warn('[Processor] ffprobe failed, assuming both streams exist:', e.message);
+  }
+
+  // Fix: resolve hardware encoder BEFORE entering the Promise, so the Promise
+  // callback is fully synchronous (avoids the `new Promise(async ...)` anti-pattern)
+  const hw = process.platform !== 'darwin' ? await hwEncoderCache : { nvenc: false, vaapi: false };
+  const filters = await filterCache;
+
+  const outputExt = path.extname(outputPath).toLowerCase();
+  const useFaststart = outputExt === '.mp4' || outputExt === '.m4v';
+
+  // Extract autoSubtitles outside the promise so we can await properly
+  const autoSubtitles = options.autoSubtitles === 'true' || options.autoSubtitles === true;
+  let generatedSrtPath = null;
+  if (autoSubtitles && hasOriginalVideo) {
+    if (updateProgress) updateProgress(1); // Indicate that we are processing AI
+
+    console.log(`[Processor] Auto-Subtitles requested. Extracting audio from ${inputPath}`);
+    const audioTempPath = path.join(path.dirname(outputPath), `${path.basename(outputPath, outputExt)}_temp_audio.wav`);
+    
+    await new Promise((resolve, reject) => {
+      const p = spawn(ffmpegStatic, [
+        '-i', inputPath,
+        '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1',
+        audioTempPath,
+        '-y'
+      ]);
+      p.on('close', code => {
+        if (code === 0) resolve();
+        else reject(new Error('Audio extraction failed'));
+      });
+    });
+
+    console.log(`[Processor] Audio extracted to ${audioTempPath}. Running Whisper AI (this may take a while)...`);
+    try {
+      await nodewhisper(audioTempPath, {
+        modelName: 'base',
+        autoDownloadModelName: 'base',
+        whisperOptions: {
+          language: 'auto',
+          translateToEnglish: true,
+          outputInSrt: true
+        }
+      });
+      generatedSrtPath = audioTempPath + '.srt';
+      if (updateProgress) updateProgress(5); // Whisper finished, move progress forward
+      console.log(`[Processor] Whisper AI finished. SRT generated at ${generatedSrtPath}`);
+    } catch (err) {
+      console.error(`[Processor] Whisper error:`, err);
+      throw new Error('Auto-subtitles generation failed: ' + err.message);
+    }
+  }
+
+  return new Promise((resolve, reject) => {
+    const {
+      // Trim
+      trimStart = null,
+      trimEnd = null,
+      // Crop
+      cropEnabled = false,
+      cropWidth = null,
+      cropHeight = null,
+      cropX = 0,
+      cropY = 0,
+      // Watermark
+      watermarkEnabled = false,
+      watermarkWidth = null,
+      watermarkHeight = null,
+      watermarkX = 0,
+      watermarkY = 0,
+      // Speed
+      speed = 1.0,
+      // Color grading
+      colorPreset = 'none',
+      saturation = 1.0,
+      brightness = 0.0,
+      contrast = 1.0,
+      // Captions
+      captionText = '',
+      captionPosition = 'bottom',
+      captionSize = 36,
+      captionColor = 'white',
+      // Auto Subtitles
+      autoSubtitles = false,
+      // Audio
+      audioMode: rawAudioMode = 'keep',
+      audioVolume = 0.3,
+    } = options || {};
+
+    let audioMode = rawAudioMode;
+    if (audioMode === 'mix' && !hasOriginalAudio) {
+      console.log('[Processor] Original video has no audio stream, falling back mix → replace');
+      audioMode = 'replace';
+    }
+
+    const hasExternalAudio = options && options.audioPath && fs.existsSync(options.audioPath);
+    const safeSpeed = Math.min(Math.max(parseFloat(speed) || 1.0, 0.5), 2.0);
+    const safeSaturation = Math.min(Math.max(parseFloat(saturation) || 1.0, 0.0), 3.0);
+    const safeBrightness = Math.min(Math.max(parseFloat(brightness) || 0.0, -1.0), 1.0);
+    const safeContrast = Math.min(Math.max(parseFloat(contrast) || 1.0, 0.0), 2.0);
+
+    // ── Determine if video re-encoding is strictly necessary ───────────────
+    const needsCrop = cropEnabled && cropWidth > 0 && cropHeight > 0;
+    const needsWatermark = watermarkEnabled && watermarkWidth > 0 && watermarkHeight > 0;
+    const needsSpeedChange = Math.abs(safeSpeed - 1.0) > 0.001;
+    let needsCaption = captionText && captionText.trim() !== '';
+    if (needsCaption) {
+      if (!filters.drawtext) {
+        console.warn('[Processor] WARNING: drawtext filter is missing in this FFmpeg binary. Captions will be ignored to prevent a fatal crash.');
+        needsCaption = false;
+      }
+    }
+
+    const colorChanged =
+      colorPreset !== 'none' ||
+      Math.abs(safeSaturation - 1.0) > 0.01 ||
+      Math.abs(safeBrightness) > 0.01 ||
+      Math.abs(safeContrast - 1.0) > 0.01;
+
+    const needsVideoEncode = hasOriginalVideo && (needsCrop || needsWatermark || needsSpeedChange || needsCaption || autoSubtitles || colorChanged);
+
+    // ── Determine Pipeline ──────────────────────────────────────────────────
+    let pipeline = 'cpu';
+    if (!needsVideoEncode) {
+      pipeline = 'copy';
+    } else if (process.platform === 'darwin') {
+      pipeline = 'macos';
+    } else if (hw.nvenc) {
+      pipeline = 'nvenc';
+    } else if (hw.vaapi) {
+      const vaapiDevice = process.env.VAAPI_DEVICE || '/dev/dri/renderD128';
+      let vaapiUsable = false;
+      try {
+        // Verify the device exists and is readable/writable
+        fs.accessSync(vaapiDevice, fs.constants.R_OK | fs.constants.W_OK);
+        vaapiUsable = true;
+      } catch (err) {
+        // Device missing or permissions issue
+      }
+      
+      if (vaapiUsable) {
+        pipeline = 'vaapi';
+      } else {
+        console.log(`[Processor] VAAPI encoder detected but hardware device unavailable (${vaapiDevice}).`);
+        console.log(`[Processor] Falling back to libx264.`);
+        // Fallback to CPU happens implicitly since pipeline remains 'cpu' if not updated
+      }
+    }
+
+    // ── Build video filter chain ────────────────────────────────────────────
+    const vfParts = [];
+
+    let captionFile = null;
+
+    if (needsVideoEncode) {
+      // 0. Watermark remover (delogo) - MUST be before crop to use original coords
+      if (needsWatermark) {
+        vfParts.push(`delogo=x=${watermarkX}:y=${watermarkY}:w=${watermarkWidth}:h=${watermarkHeight}`);
+      }
+
+      // 1. Crop transform (must come before speed/color so resolution is correct)
+      if (needsCrop) {
+        vfParts.push(`crop=${cropWidth}:${cropHeight}:${cropX}:${cropY}`);
+      }
+
+      // 2. Speed — adjust video PTS (presentation timestamp)
+      if (needsSpeedChange) {
+        vfParts.push(`setpts=${(1.0 / safeSpeed).toFixed(4)}*PTS`);
+      }
+
+      // 3. Color grading
+      if (colorChanged) {
+        let eqSaturation = safeSaturation;
+        let eqBrightness = safeBrightness;
+        let eqContrast = safeContrast;
+        let eqGamma = 1.0;
+
+        // Note: Using pure `eq` adjustments instead of `colorchannelmixer` RGB tints.
+        // `colorchannelmixer` requires RGB format conversions which are incredibly slow on CPU.
+        // By relying solely on `eq`, processing stays in native YUV format, yielding ~5x speedup.
+        if (colorPreset === 'warm') {
+          eqSaturation = Math.max(eqSaturation, 1.3);
+          eqContrast = Math.max(eqContrast, 1.05);
+          eqGamma = 1.05;
+        } else if (colorPreset === 'cool') {
+          eqSaturation = Math.max(eqSaturation, 1.1);
+          eqGamma = 0.95;
+        } else if (colorPreset === 'vivid') {
+          eqSaturation = Math.max(eqSaturation, 1.8);
+          eqContrast = Math.max(eqContrast, 1.2);
+        } else if (colorPreset === 'cinematic') {
+          eqSaturation = Math.max(eqSaturation, 0.85);
+          eqContrast = Math.max(eqContrast, 1.15);
+          eqBrightness = eqBrightness - 0.05;
+          eqGamma = 0.9;
+        } else if (colorPreset === 'vintage') {
+          eqSaturation = Math.max(eqSaturation, 0.7);
+          eqContrast = Math.max(eqContrast, 1.1);
+          eqGamma = 1.1;
+        }
+
+        vfParts.push(
+          `eq=saturation=${eqSaturation.toFixed(3)}:brightness=${eqBrightness.toFixed(3)}:contrast=${eqContrast.toFixed(3)}:gamma=${eqGamma.toFixed(3)}`
+        );
+      }
+
+      // 4. Caption burn-in
+      if (needsCaption) {
+        // Write caption to a text file to bypass FFmpeg's fragile filtergraph escaping rules.
+        // This completely prevents "Filter not found" crashes when text contains quotes, commas, colons, etc.
+        const crypto = require('crypto');
+        const outputsDir = path.join(os.tmpdir(), 'meta-remover-outputs');
+        captionFile = path.join(outputsDir, `caption-${crypto.randomUUID()}.txt`);
+        fs.writeFileSync(captionFile, captionText.trim(), 'utf8');
+
+        const fontsize = parseInt(captionSize, 10) || 36;
+        const ALLOWED_COLORS = new Set(['white', 'yellow', 'black', 'red', 'cyan']);
+        const safeColor = ALLOWED_COLORS.has(captionColor) ? captionColor : 'white';
+        const localFont = path.join(__dirname, 'bin', 'Roboto-Bold.ttf');
+        const fontPath = process.platform === 'darwin'
+          ? '/System/Library/Fonts/Helvetica.ttc'
+          : (fs.existsSync(localFont) ? localFont : '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf');
+
+        let yExpr = '';
+        if (captionPosition === 'top')         yExpr = '30';
+        else if (captionPosition === 'center') yExpr = '(h-text_h)/2';
+        else                                   yExpr = 'h-text_h-30'; // bottom (default)
+
+        vfParts.push(
+          `drawtext=textfile='${captionFile.replace(/\\/g, '/')}':fontsize=${fontsize}:fontcolor=${safeColor}:x=(w-text_w)/2:y=${yExpr}:box=1:boxcolor=black@0.5:boxborderw=8:fontfile='${fontPath}'`
+        );
+      }
+      // 5. Auto Subtitles via Whisper SRT
+      console.log(`[Processor DEBUG] generatedSrtPath: ${generatedSrtPath}`);
+      if (generatedSrtPath) {
+        console.log(`[Processor DEBUG] exists: ${fs.existsSync(generatedSrtPath)}`);
+      }
+      if (generatedSrtPath && fs.existsSync(generatedSrtPath)) {
+        // FFmpeg filter syntax requires escaping colons and slashes
+        const safeSrtPath = generatedSrtPath.replace(/\\/g, '/').replace(/:/g, '\\:');
+        console.log(`[Processor DEBUG] safeSrtPath: ${safeSrtPath}`);
+        vfParts.push(`subtitles='${safeSrtPath}'`);
+        console.log(`[Processor DEBUG] vfParts after push:`, vfParts);
+      }
+    } // end if (needsVideoEncode)
+
+    // ── Explicit VAAPI Filter Graph ─────────────────────────────────────────
+    if (pipeline === 'vaapi' && vfParts.length > 0) {
+      // Because we apply CPU filters (crop, delogo, drawtext, etc.), we explicitly
+      // download the VAAPI frame to system memory, process it, and upload it back.
+      vfParts.unshift('hwdownload', 'format=nv12');
+      vfParts.push('format=nv12', 'hwupload');
+    }
+
+    // ── Build audio filter chain ────────────────────────────────────────────
+    const afParts = [];
+    if (Math.abs(safeSpeed - 1.0) > 0.001) {
+      // atempo only works in range 0.5–2.0; chain if needed
+      let speedRemaining = safeSpeed;
+      while (speedRemaining > 2.0) { afParts.push('atempo=2.0'); speedRemaining /= 2.0; }
+      while (speedRemaining < 0.5) { afParts.push('atempo=0.5'); speedRemaining /= 0.5; }
+      afParts.push(`atempo=${speedRemaining.toFixed(4)}`);
+    }
+
+    // ── Metadata args (single consolidated array — Fix 4) ──────────────────
+    const metaArgs = buildMetaArgs(options);
+
+    // ── Build FFmpeg command ────────────────────────────────────────────────
+    let lastProgress = 0;
+    const cmd = ffmpeg(inputPath);
+    cmd.inputOptions('-threads', '0');
+    cmd.outputOptions('-max_muxing_queue_size', '9999');
+
+    // ── VAAPI Input Options ─────────────────────────────────────────────────
+    if (pipeline === 'vaapi') {
+      const vaapiDevice = process.env.VAAPI_DEVICE || '/dev/dri/renderD128';
+      cmd.inputOptions([
+        '-hwaccel', 'vaapi',
+        '-hwaccel_output_format', 'vaapi',
+        '-vaapi_device', vaapiDevice
+      ]);
+    }
+
+    // Add trim as input option (fastest — before decode)
+    if (trimStart !== null && trimStart !== '' && !isNaN(parseFloat(trimStart))) {
+      cmd.inputOptions('-ss', `${parseFloat(trimStart)}`);
+    }
+
+    // Fix 3: Add external audio input FIRST, THEN set stream_loop on it.
+    // In fluent-ffmpeg, inputOptions() targets the most recently added input.
+    // Old code applied -stream_loop to input 0 (video) by mistake.
+    if (hasExternalAudio && (audioMode === 'replace' || audioMode === 'mix')) {
+      cmd.input(options.audioPath);
+      if (audioMode === 'mix') {
+        // Now correctly targets input 1 (the audio file just added above)
+        cmd.inputOptions('-stream_loop', '-1');
+      }
+    }
+
+    if (trimEnd !== null && trimEnd !== '' && !isNaN(parseFloat(trimEnd))) {
+      const start = (trimStart !== null && !isNaN(parseFloat(trimStart))) ? parseFloat(trimStart) : 0;
+      const duration = parseFloat(trimEnd) - start;
+      if (duration > 0) cmd.outputOptions('-t', `${duration}`);
+    }
+
+    // Map streams based on audio mode
+    cmd.outputOptions('-map_metadata', '-1');
+
+    const useComplexFilter = (audioMode === 'mix' && hasExternalAudio && hasOriginalAudio);
+
+    if (useComplexFilter) {
+      cmd.input(options.audioPath);
+      let filterComplex = '';
+      if (needsVideoEncode && vfParts.length > 0) {
+        filterComplex += `[0:v]${vfParts.join(',')}[vout];`;
+      } else if (hasOriginalVideo) {
+        filterComplex += '[0:v]null[vout];';
+      }
+
+      const vol1 = (1.0 - parseFloat(audioVolume)).toFixed(2);
+      const vol2 = parseFloat(audioVolume).toFixed(2);
+
+      filterComplex += afParts.length > 0
+        ? `[0:a]volume=${vol1},${afParts.join(',')}[a1];`
+        : `[0:a]volume=${vol1}[a1];`;
+      filterComplex += `[1:a]volume=${vol2}[a2];`;
+      filterComplex += '[a1][a2]amix=inputs=2:duration=first:dropout_transition=3[aout]';
+
+      cmd.complexFilter(filterComplex);
+
+      if (needsVideoEncode || hasOriginalVideo) {
+        cmd.outputOptions('-map', '[vout]', '-map', '[aout]');
+      } else {
+        cmd.outputOptions('-map', '[aout]');
+      }
+    } else {
+      if (needsVideoEncode && vfParts.length > 0) {
+        cmd.videoFilter(vfParts.join(','));
+      }
+
+      if (audioMode === 'mute') {
+        cmd.noAudio();
+      } else if (audioMode === 'replace' && hasExternalAudio) {
+        cmd.input(options.audioPath);
+        cmd.outputOptions('-map', '0:v?', '-map', '1:a?');
+        if (afParts.length > 0) cmd.audioFilter(afParts.join(','));
+      } else if (audioMode === 'mix' && hasExternalAudio && !hasOriginalAudio) {
+        cmd.input(options.audioPath);
+        cmd.outputOptions('-map', '0:v?', '-map', '1:a?');
+        if (afParts.length > 0) cmd.audioFilter(afParts.join(','));
+      } else {
+        if (afParts.length > 0 && hasOriginalAudio) cmd.audioFilter(afParts.join(','));
+      }
+    }
+
+    // ── Encoding settings (GPU detection + macOS quality mode) ──────────────
+    if (pipeline === 'macos') {
+      cmd
+        .videoCodec('h264_videotoolbox')
+        .outputOptions('-b:v', '6000k', '-maxrate', '9000k', '-bufsize', '4000k', '-allow_sw', '1', '-threads', '0');
+    } else if (pipeline === 'nvenc') {
+      console.log('[Processor] Encoding with h264_nvenc (NVIDIA GPU)');
+      cmd
+        .videoCodec('h264_nvenc')
+        .outputOptions('-preset', 'p1', '-rc', 'vbr', '-cq', '23', '-threads', '0');
+    } else if (pipeline === 'vaapi') {
+      console.log(`[Processor] GPU detected: h264_vaapi`);
+      console.log(`[Processor] Selected encoder: VAAPI`);
+      console.log(`[Processor] Hardware decoding: enabled`);
+      console.log(`[Processor] Hardware encoding: enabled`);
+      console.log(`[Processor] Filter chain:\n${vfParts.join('\n')}`);
+      console.log(`[Processor] Using GPU pipeline`);
+      cmd
+        .videoCodec('h264_vaapi')
+        .outputOptions('-threads', '0');
+    } else if (pipeline === 'cpu') {
+      console.log('[Processor] GPU unavailable\n[Processor] Falling back to libx264');
+      cmd
+        .videoCodec('libx264')
+        .outputOptions('-crf', '28', '-preset', 'ultrafast', '-profile:v', 'baseline', '-tune', 'fastdecode,zerolatency', '-pix_fmt', 'yuv420p', '-threads', '0');
+    } else if (pipeline === 'copy') {
+      console.log('[Processor] Smart bypass enabled: Copying video stream instead of re-encoding');
+      cmd.videoCodec('copy');
+    }
+
+    // Explicitly use the fastest scaler algorithm for any auto-inserted format conversions
+    cmd.outputOptions('-sws_flags', 'fast_bilinear');
+
+    const needsAudioEncode = afParts.length > 0 || audioMode === 'mix' || (audioMode === 'replace' && hasExternalAudio);
+    if (needsAudioEncode) {
+      cmd.audioCodec('aac').outputOptions('-b:a', '128k');
+    } else {
+      cmd.audioCodec('copy');
+    }
+
+    // Apply metadata pairs safely — two-argument form bypasses fluent-ffmpeg's
+    // auto-split that would corrupt values containing exactly one space.
+    applyMetaArgs(cmd, metaArgs);
+
+    // Explicitly declare output format — same safeguard as replaceVideoMetadata
+    const fmt = EXT_TO_FORMAT[outputExt];
+    if (fmt) cmd.outputOptions('-f', fmt);
+
+    if (useFaststart) cmd.outputOptions('-movflags', '+faststart');
+
+    cmd
+      .output(outputPath)
+      .on('start', (cmdStr) => {
+        console.log('[Processor] FFmpeg transform command:', cmdStr);
+        if (updateProgress) updateProgress(5);
+      })
+      .on('progress', (info) => {
+        const pct = Math.min(Math.round(info.percent || 0), 95);
+        if (pct > lastProgress) {
+          lastProgress = pct;
+          if (updateProgress) updateProgress(pct);
+        }
+      })
+      .on('end', () => {
+        console.log(`[Processor] Finished job for output: ${outputPath}`);
+        if (updateProgress) updateProgress(100);
+        if (captionFile) { try { fs.unlinkSync(captionFile); } catch {} }
+        resolve(outputPath);
+      })
+      .on('error', (err) => {
+        console.error('[Processor] FFmpeg transform error:', err.message);
+        if (captionFile) { try { fs.unlinkSync(captionFile); } catch {} }
+        reject(err);
+      })
+      .run();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Safe fallback: plain copy for unsupported file types
+// ---------------------------------------------------------------------------
+function copyFile(inputPath, outputPath) {
+  fs.copyFileSync(inputPath, outputPath);
+  console.log(`[Processor] File copied (no processing available): ${path.basename(outputPath)}`);
+}
+
+// ---------------------------------------------------------------------------
+// Main routing function called by the queue
+// ---------------------------------------------------------------------------
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.flv', '.wmv', '.3gp']);
+
+async function processFile(job) {
+  const { inputPath, outputPath, mimeType, customMeta, transformOptions, mode } = job;
+  console.log(`[Processor] Processing mode="${mode}": ${mimeType} — file: ${path.basename(inputPath)}`);
+
+  const ext = path.extname(inputPath).toLowerCase();
+  const isJpeg = mimeType === 'image/jpeg' || ext === '.jpg' || ext === '.jpeg';
+  const isVideo = VIDEO_EXTENSIONS.has(ext) || (mimeType && mimeType.startsWith('video/'));
+  const outputExt = path.extname(outputPath).toLowerCase();
+
+  // Fix 2: Run ffprobe ONCE here for transform jobs, before FFmpeg starts.
+  // The cached result is passed into transformVideo so it doesn't probe again.
+  let cachedProbe = null;
+  if (isVideo && mode === 'transform') {
+    try {
+      cachedProbe = await ffprobeAsync(inputPath);
+    } catch (e) {
+      console.warn('[Processor] Pre-probe failed, transformVideo will retry:', e.message);
+    }
+  }
+
+  try {
+    if (isVideo && mode === 'transform') {
+      await transformVideo(inputPath, outputPath, transformOptions, job.updateProgress, cachedProbe);
+    } else if (isVideo) {
+      // Default: fast metadata-only mode (stream-copy)
+      await replaceVideoMetadata(inputPath, outputPath, customMeta, job.updateProgress, outputExt);
+    } else if (isJpeg) {
+      await stripJpegMetadata(inputPath, outputPath);  // Fix 1: now async
+      if (typeof job.updateProgress === 'function') job.updateProgress(100);
+    } else {
+      copyFile(inputPath, outputPath);
+      if (typeof job.updateProgress === 'function') job.updateProgress(100);
+    }
+  } catch (err) {
+    console.error('[Processor] Error during processing:', err.message);
+    throw err; // Fail the job properly so the queue handles it
+  } finally {
+    // Always cleanup original upload after processing or failure
+    try { fs.unlinkSync(inputPath); } catch { /* ignore */ }
+    // Always cleanup external audio file if present
+    if (transformOptions && transformOptions.audioPath) {
+      try { fs.unlinkSync(transformOptions.audioPath); } catch { /* ignore */ }
+    }
+  }
+
+  return outputPath;
+}
+
+module.exports = { processFile };
