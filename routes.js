@@ -4,7 +4,7 @@ const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { processingQueue, jobStatuses } = require('./queue');
+const { processingQueue } = require('./queue');
 
 const router = express.Router();
 
@@ -41,7 +41,7 @@ const upload = multer({
 ]);
 
 // Upload endpoint
-router.post('/upload', upload, (req, res) => {
+router.post('/upload', upload, async (req, res) => {
   const files = req.files || {};
   if (!files.file || files.file.length === 0) {
     return res.status(400).json({ error: 'No file uploaded' });
@@ -128,7 +128,7 @@ router.post('/upload', upload, (req, res) => {
     ? path.basename(videoFile.originalname, originalExt) + '_transformed.mp4'
     : videoFile.originalname;
 
-  const job = {
+  const jobData = {
     id: jobId,
     inputPath,
     outputPath,
@@ -139,74 +139,95 @@ router.post('/upload', upload, (req, res) => {
     mode,
   };
 
-  // Set status BEFORE pushing to queue to avoid race condition
-  jobStatuses.set(jobId, { status: 'queued', progress: 0, timestamp: Date.now() });
-  processingQueue.push(job);
+  // Add job to BullMQ
+  await processingQueue.add('video-process', jobData, { jobId });
 
   res.status(202).json({ jobId, message: 'File queued for processing' });
 });
 
 // Status endpoint
-router.get('/status/:id', (req, res) => {
+router.get('/status/:id', async (req, res) => {
   const jobId = req.params.id;
-  const statusInfo = jobStatuses.get(jobId);
-  if (!statusInfo) {
-    return res.status(404).json({ error: 'Job not found' });
+  try {
+    const job = await processingQueue.getJob(jobId);
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    
+    const state = await job.getState();
+    const progress = job.progress || 0;
+    
+    let status = 'queued';
+    if (state === 'active') status = 'processing';
+    if (state === 'completed') status = 'completed';
+    if (state === 'failed') status = 'failed';
+    
+    res.json({
+      status,
+      progress,
+      result: job.returnvalue ? job.returnvalue.outputPath : null,
+      originalName: job.returnvalue ? job.returnvalue.originalName : null,
+      error: job.failedReason
+    });
+  } catch (error) {
+    console.error(`[Routes] Error fetching job status:`, error);
+    res.status(500).json({ error: 'Internal Server Error' });
   }
-  res.json(statusInfo);
 });
 
 // Download endpoint
-router.get('/download/:id', (req, res) => {
+router.get('/download/:id', async (req, res) => {
   const jobId = req.params.id;
-  const statusInfo = jobStatuses.get(jobId);
-
-  if (!statusInfo || statusInfo.status !== 'completed') {
-    return res.status(400).json({ error: 'File not ready or job failed' });
-  }
-
-  const filePath = statusInfo.result;
-  const originalName = statusInfo.originalName || 'processed_file';
-
-  console.log(`[Routes] Download requested: ${filePath}`);
-
-  if (!fs.existsSync(filePath)) {
-    console.error(`[Routes] File missing: ${filePath}`);
-    return res.status(404).json({ error: 'File not found on server. Please re-upload and try again.' });
-  }
-
-  const stat = fs.statSync(filePath);
-  const ext = path.extname(filePath);
-  const mimeTypes = {
-    '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.avi': 'video/x-msvideo',
-    '.mkv': 'video/x-matroska', '.webm': 'video/webm', '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg', '.png': 'image/png', '.pdf': 'application/pdf',
-    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  };
-  const contentType = mimeTypes[ext.toLowerCase()] || 'application/octet-stream';
-
-  // Set headers explicitly — required for cross-origin fetch() downloads
-  res.set({
-    'Content-Type': contentType,
-    'Content-Length': stat.size,
-    'Content-Disposition': `attachment; filename="${encodeURIComponent(originalName)}"`,
-    'Access-Control-Expose-Headers': 'Content-Disposition, Content-Length',
-  });
-
-  // Stream the file to avoid loading the entire thing into memory
-  const stream = fs.createReadStream(filePath);
-
-  stream.on('error', (err) => {
-    console.error('[Routes] Stream error:', err.message);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Error reading file' });
+  
+  try {
+    const job = await processingQueue.getJob(jobId);
+    if (!job || await job.getState() !== 'completed') {
+      return res.status(400).json({ error: 'File not ready or job failed' });
     }
-  });
 
-  // Note: /tmp is cleaned up by the OS naturally.
-  // We do NOT auto-delete here because the browser may make multiple
-  // range requests to load the file (especially for video/audio).
-  stream.pipe(res);
+    const filePath = job.returnvalue.outputPath;
+    const originalName = job.returnvalue.originalName || 'processed_file';
+
+    console.log(`[Routes] Download requested: ${filePath}`);
+
+    if (!fs.existsSync(filePath)) {
+      console.error(`[Routes] File missing: ${filePath}`);
+      return res.status(404).json({ error: 'File not found on server. Please re-upload and try again.' });
+    }
+
+    const stat = fs.statSync(filePath);
+    const ext = path.extname(filePath);
+    const mimeTypes = {
+      '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.avi': 'video/x-msvideo',
+      '.mkv': 'video/x-matroska', '.webm': 'video/webm', '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg', '.png': 'image/png', '.pdf': 'application/pdf',
+      '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    };
+    const contentType = mimeTypes[ext.toLowerCase()] || 'application/octet-stream';
+
+    // Set headers explicitly — required for cross-origin fetch() downloads
+    res.set({
+      'Content-Type': contentType,
+      'Content-Length': stat.size,
+      'Content-Disposition': `attachment; filename="${encodeURIComponent(originalName)}"`,
+      'Access-Control-Expose-Headers': 'Content-Disposition, Content-Length',
+    });
+
+    // Stream the file to avoid loading the entire thing into memory
+    const stream = fs.createReadStream(filePath);
+
+    stream.on('error', (err) => {
+      console.error('[Routes] Stream error:', err.message);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Error reading file' });
+      }
+    });
+
+    stream.pipe(res);
+  } catch (error) {
+    console.error(`[Routes] Error downloading file:`, error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
 });
 
 module.exports = { router };

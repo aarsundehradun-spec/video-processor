@@ -1,52 +1,43 @@
-const Queue = require('better-queue');
+const { Queue, Worker } = require('bullmq');
+const IORedis = require('ioredis');
 const { processFile } = require('./processor');
 
-// Store job statuses in memory (in a real enterprise app, use Redis or a DB)
-const jobStatuses = new Map();
+// Redis connection setup
+const connection = new IORedis(process.env.REDIS_URL || 'redis://127.0.0.1:6379', {
+  maxRetriesPerRequest: null,
+});
 
-// Periodically clean up old jobs from memory (older than 30 minutes)
-setInterval(() => {
-  const thirtyMinsAgo = Date.now() - (30 * 60 * 1000);
-  for (const [id, job] of jobStatuses.entries()) {
-    if (job.timestamp && job.timestamp < thirtyMinsAgo) {
-      jobStatuses.delete(id);
-    }
-  }
-}, 15 * 60 * 1000);
+// Create the Queue
+const processingQueue = new Queue('VideoProcessingQueue', { connection });
 
-const processingQueue = new Queue(async (task, cb) => {
-  const { id } = task;
+// Create the Worker
+const worker = new Worker('VideoProcessingQueue', async (job) => {
+  const task = job.data;
   
-  try {
-    // Update status to processing
-    jobStatuses.set(id, { status: 'processing', progress: 0, timestamp: Date.now() });
-    
-    // Provide a way for processor to update progress
-    task.updateProgress = (progress) => {
-      const current = jobStatuses.get(id) || {};
-      jobStatuses.set(id, { ...current, status: 'processing', progress, timestamp: Date.now() });
-    };
+  // Provide a way for processor to update progress
+  task.updateProgress = async (progress) => {
+    await job.updateProgress(progress);
+  };
 
+  try {
     const outputPath = await processFile(task);
-    
-    jobStatuses.set(id, { 
-      status: 'completed', 
-      progress: 100, 
-      result: outputPath,
-      originalName: task.originalName || 'processed_file',
-      timestamp: Date.now()
-    });
-    cb(null, outputPath);
+    return {
+      outputPath,
+      originalName: task.originalName || 'processed_file'
+    };
   } catch (error) {
-    console.error(`Job ${id} failed:`, error);
-    jobStatuses.set(id, { status: 'failed', error: error.message, timestamp: Date.now() });
-    cb(error);
+    console.error(`[Worker] Job ${job.id} failed:`, error);
+    throw error;
   }
-}, { concurrent: 1 }); // Serialize encodes: each job uses -threads 0 (all CPU cores).
-                       // Running 2 concurrent encodes halves CPU per job — slower overall.
-                       // Stream-copy (metadata-only) jobs are near-instant so serialization has no real cost.
+}, { 
+  connection,
+  concurrency: 1 // Serialize encodes: each job uses -threads 0 (all CPU cores).
+});
+
+worker.on('failed', (job, err) => {
+  console.error(`[Worker] Job ${job.id} failed with reason: ${err.message}`);
+});
 
 module.exports = {
   processingQueue,
-  jobStatuses
 };
