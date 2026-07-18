@@ -415,7 +415,14 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
     if (needsVideoEncode) {
       // 0. Watermark remover (delogo) - MUST be before crop to use original coords
       if (needsWatermark) {
-        vfParts.push(`delogo=x=${watermarkX}:y=${watermarkY}:w=${watermarkWidth}:h=${watermarkHeight}`);
+        // FFmpeg 4.3 delogo crashes if x/y are exactly 0 or if bounds are odd/out of bounds.
+        const safeX = Math.max(1, parseInt(watermarkX) || 1);
+        const safeY = Math.max(1, parseInt(watermarkY) || 1);
+        const w = parseInt(watermarkWidth) || 10;
+        const h = parseInt(watermarkHeight) || 10;
+        const safeW = w % 2 === 0 ? w : w - 1;
+        const safeH = h % 2 === 0 ? h : h - 1;
+        vfParts.push(`delogo=x=${safeX}:y=${safeY}:w=${Math.max(2, safeW)}:h=${Math.max(2, safeH)}`);
       }
 
       // 1. Crop transform (must come before speed/color so resolution is correct)
