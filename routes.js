@@ -9,8 +9,8 @@ const { processingQueue } = require('./queue');
 
 const router = express.Router();
 
-// Use /tmp for ALL file storage — always writable on any Linux/cloud server
-const TMP_DIR = os.tmpdir();
+// Use local disk instead of /tmp (which is mapped to RAM in Render Free Tier)
+const TMP_DIR = path.join(__dirname, 'disk_tmp');
 const UPLOADS_DIR = path.join(TMP_DIR, 'meta-remover-uploads');
 const OUTPUTS_DIR = path.join(TMP_DIR, 'meta-remover-outputs');
 

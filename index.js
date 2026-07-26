@@ -64,7 +64,7 @@ app.use((err, req, res, next) => {
 
 // Start Background Cleanup Task
 const os = require('os');
-const TMP_DIR = os.tmpdir();
+const TMP_DIR = path.join(__dirname, 'disk_tmp');
 const UPLOADS_DIR = path.join(TMP_DIR, 'meta-remover-uploads');
 const OUTPUTS_DIR = path.join(TMP_DIR, 'meta-remover-outputs');
 
