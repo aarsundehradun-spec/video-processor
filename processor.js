@@ -705,7 +705,7 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
         // Write caption to a text file to bypass FFmpeg's fragile filtergraph escaping rules.
         // This completely prevents "Filter not found" crashes when text contains quotes, commas, colons, etc.
         const crypto = require('crypto');
-        const outputsDir = path.join(os.tmpdir(), 'meta-remover-outputs');
+        const outputsDir = path.join(__dirname, 'disk_tmp', 'meta-remover-outputs');
         captionFile = path.join(outputsDir, `caption-${crypto.randomUUID()}.txt`);
         fs.writeFileSync(captionFile, captionText.trim(), 'utf8');
 
