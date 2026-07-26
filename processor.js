@@ -249,6 +249,7 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
   let hasOriginalVideo = true;
   let hasOriginalAudio = true;
   let videoWidth = 0;
+  let videoDuration = 10;
   try {
     const probe = cachedProbe || (await ffprobeAsync(inputPath));
     if (probe && probe.streams) {
@@ -256,6 +257,9 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
       hasOriginalAudio = probe.streams.some(s => s.codec_type === 'audio');
       const vStream = probe.streams.find(s => s.codec_type === 'video');
       if (vStream) videoWidth = vStream.width || 0;
+      if (probe.format && probe.format.duration) {
+        videoDuration = parseFloat(probe.format.duration);
+      }
     }
   } catch (e) {
     console.warn('[Processor] ffprobe failed, assuming both streams exist:', e.message);
@@ -681,18 +685,18 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
         if (speedRampCurve === 'wave') {
           // Sinusoidal: gently accelerates/decelerates; near-invisible to viewer
           // Speed oscillates ±5% around 1.0x across the full clip
-          ptsExpr = `PTS*(1+0.05*sin(2*PI*PTS/DURATION))`;
+          ptsExpr = `PTS*(1+0.05*sin(2*PI*PTS/${videoDuration}))`;
         } else if (speedRampCurve === 'slow-fast') {
           // Start slow (0.9x), end fast (1.1x) — a single linear ramp
-          ptsExpr = `PTS*(0.9+0.2*(PTS/DURATION))`;
+          ptsExpr = `PTS*(0.9+0.2*(PTS/${videoDuration}))`;
         } else if (speedRampCurve === 'fast-slow') {
           // Start fast (1.1x), end slow (0.9x)
-          ptsExpr = `PTS*(1.1-0.2*(PTS/DURATION))`;
+          ptsExpr = `PTS*(1.1-0.2*(PTS/${videoDuration}))`;
         } else {
           // Fallback: random-ish wave using multiple harmonics
-          ptsExpr = `PTS*(1+0.04*sin(2*PI*PTS/DURATION)+0.02*sin(4*PI*PTS/DURATION))`;
+          ptsExpr = `PTS*(1+0.04*sin(2*PI*PTS/${videoDuration})+0.02*sin(4*PI*PTS/${videoDuration}))`;
         }
-        // setpts evaluates the expression per-frame; DURATION = full video duration in seconds
+        // setpts evaluates the expression per-frame
         vfParts.push(`setpts=${ptsExpr}`);
       }
 
@@ -997,21 +1001,21 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
     applyMetaArgs(cmd, metaArgs);
 
     // Explicitly declare output format — same safeguard as replaceVideoMetadata
-    const fmt = EXT_TO_FORMAT[outputExt];
-    if (fmt) cmd.outputOptions('-f', fmt);
+    let finalFmt = EXT_TO_FORMAT[outputExt];
 
     // ── Feature 17: Container Re-Mux format override ─────────────────────────
     if (remuxEnabled && remuxFormat) {
       const SAFE_FORMATS = { mkv: 'matroska', mov: 'mov', avi: 'avi', webm: 'webm', ts: 'mpegts' };
       const safeRemuxFmt = SAFE_FORMATS[remuxFormat.toLowerCase()];
       if (safeRemuxFmt) {
-        // Override the -f flag already set above
-        cmd.outputOptions('-f', safeRemuxFmt);
+        finalFmt = safeRemuxFmt;
         console.log(`[Processor] Container re-mux: output format overridden to '${safeRemuxFmt}'`);
       } else {
         console.warn(`[Processor] Unknown remux format '${remuxFormat}', keeping original.`);
       }
     }
+
+    if (finalFmt) cmd.outputOptions('-f', finalFmt);
 
     if (useFaststart) cmd.outputOptions('-movflags', '+faststart');
 
