@@ -794,7 +794,7 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
     // ── Build FFmpeg command ────────────────────────────────────────────────
     let lastProgress = 0;
     const cmd = ffmpeg(inputPath);
-    cmd.inputOptions('-threads', '0');
+    cmd.inputOptions('-threads', '1');
     cmd.outputOptions('-max_muxing_queue_size', '9999');
 
     // ── VAAPI Input Options ─────────────────────────────────────────────────
@@ -958,12 +958,12 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
     if (pipeline === 'macos') {
       cmd
         .videoCodec('h264_videotoolbox')
-        .outputOptions('-b:v', '6000k', '-maxrate', '9000k', '-bufsize', '4000k', '-allow_sw', '1', '-threads', '0');
+        .outputOptions('-b:v', '6000k', '-maxrate', '9000k', '-bufsize', '4000k', '-allow_sw', '1', '-threads', '1');
     } else if (pipeline === 'nvenc') {
       console.log('[Processor] Encoding with h264_nvenc (NVIDIA GPU)');
       cmd
         .videoCodec('h264_nvenc')
-        .outputOptions('-preset', 'p1', '-rc', 'vbr', '-cq', '23', '-threads', '0');
+        .outputOptions('-preset', 'p1', '-rc', 'vbr', '-cq', '23', '-threads', '1');
     } else if (pipeline === 'vaapi') {
       console.log(`[Processor] GPU detected: h264_vaapi`);
       console.log(`[Processor] Selected encoder: VAAPI`);
@@ -973,12 +973,12 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
       console.log(`[Processor] Using GPU pipeline`);
       cmd
         .videoCodec('h264_vaapi')
-        .outputOptions('-threads', '0');
+        .outputOptions('-threads', '1');
     } else if (pipeline === 'cpu') {
       console.log('[Processor] GPU unavailable\n[Processor] Falling back to libx264');
       cmd
         .videoCodec('libx264')
-        .outputOptions('-crf', '28', '-preset', 'ultrafast', '-profile:v', 'baseline', '-tune', 'fastdecode,zerolatency', '-pix_fmt', 'yuv420p', '-threads', '0');
+        .outputOptions('-crf', '28', '-preset', 'ultrafast', '-profile:v', 'baseline', '-tune', 'fastdecode,zerolatency', '-pix_fmt', 'yuv420p', '-threads', '1');
     } else if (pipeline === 'copy') {
       console.log('[Processor] Smart bypass enabled: Copying video stream instead of re-encoding');
       cmd.videoCodec('copy');
