@@ -795,7 +795,7 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
     let lastProgress = 0;
     const cmd = ffmpeg(inputPath);
     cmd.inputOptions('-threads', '1');
-    cmd.outputOptions('-max_muxing_queue_size', '9999');
+    cmd.outputOptions('-max_muxing_queue_size', '1024');
 
     // ── VAAPI Input Options ─────────────────────────────────────────────────
     if (pipeline === 'vaapi') {
