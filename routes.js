@@ -122,11 +122,84 @@ router.post('/upload', upload, async (req, res) => {
     audioMode:   (req.body.audioMode   || 'keep').trim(),
     audioVolume: parseFloat(req.body.audioVolume || '0.3'),
     audioPath:   audioFile ? audioFile.path : null,
+
+    // ── Feature 1: Mirror ──────────────────────────────────────────────────
+    mirrorEnabled: req.body.mirrorEnabled === 'true',
+
+    // ── Feature 2: Split-Screen Underlay ───────────────────────────────────
+    splitScreenEnabled: req.body.splitScreenEnabled === 'true',
+    splitDirection:     (req.body.splitDirection || 'vertical').trim(),
+
+    // ── Feature 3: Border / Padding ────────────────────────────────────────
+    borderEnabled: req.body.borderEnabled === 'true',
+    borderPadding: parseFloat(req.body.borderPadding || '10'),
+    borderColor:   (req.body.borderColor || 'black').trim(),
+
+    // ── Feature 4: Pitch Shift (audio) ─────────────────────────────────────
+    pitchShiftEnabled:   req.body.pitchShiftEnabled === 'true',
+    pitchShiftSemitones: parseFloat(req.body.pitchShiftSemitones || '0'),
+
+    // ── Feature 5: Film Grain ──────────────────────────────────────────────
+    grainEnabled:   req.body.grainEnabled === 'true',
+    grainIntensity: parseInt(req.body.grainIntensity || '20', 10),
+
+    // ── Feature 6: Dynamic Zoom ────────────────────────────────────────────
+    zoomEnabled:   req.body.zoomEnabled === 'true',
+    zoomDirection: (req.body.zoomDirection || 'zoom-in').trim(),
+    zoomIntensity: (req.body.zoomIntensity || 'subtle').trim(),
+
+    // ── Feature 7: FPS Conversion ──────────────────────────────────────────
+    fpsEnabled: req.body.fpsEnabled === 'true',
+    targetFps:  parseInt(req.body.targetFps || '30', 10),
+
+    // ── Feature 8: Face / Privacy Blur ─────────────────────────────────────
+    faceBlurEnabled:   req.body.faceBlurEnabled === 'true',
+    faceBlurStrength:  parseInt(req.body.faceBlurStrength || '3', 10),
+
+    // ── New Feature 9: Hue Rotation ───────────────────────────────────────
+    hueEnabled:  req.body.hueEnabled === 'true',
+    hueDegrees:  parseFloat(req.body.hueDegrees || '10'),
+
+    // ── New Feature 10: Micro-Tilt Rotation ───────────────────────────────
+    tiltEnabled:  req.body.tiltEnabled === 'true',
+    tiltAngle:    parseFloat(req.body.tiltAngle || '1.0'),
+
+    // ── New Feature 11: Audio Noise Floor ─────────────────────────────────
+    noiseFloorEnabled:  req.body.noiseFloorEnabled === 'true',
+    noiseFloorDb:       parseFloat(req.body.noiseFloorDb || '-38'),
+
+    // ── New Feature 12: Temporal Frame Jitter ─────────────────────────────
+    frameJitterEnabled:   req.body.frameJitterEnabled === 'true',
+    frameJitterFrames:    parseInt(req.body.frameJitterFrames || '2', 10),
+
+    // ── New Feature 13: Variable Speed Ramp ───────────────────────────────
+    speedRampEnabled: req.body.speedRampEnabled === 'true',
+    speedRampCurve:   (req.body.speedRampCurve || 'wave').trim(),
+
+    // ── New Feature 14: Audio EQ Shift ────────────────────────────────────
+    audioEqEnabled:   req.body.audioEqEnabled === 'true',
+    audioEqPreset:    (req.body.audioEqPreset || 'cut-low').trim(),
+
+    // ── New Feature 15: Vertical Crop Reframe ─────────────────────────────
+    vCropEnabled: req.body.vCropEnabled === 'true',
+    vCropPercent: parseFloat(req.body.vCropPercent || '3'),
+    vCropAxis:    (req.body.vCropAxis || 'vertical').trim(),
+
+    // ── New Feature 16: Thumbnail Randomizer ──────────────────────────────
+    thumbRandomEnabled:  req.body.thumbRandomEnabled === 'true',
+    thumbIntroSeconds:   parseFloat(req.body.thumbIntroSeconds || '0.5'),
+
+    // ── New Feature 17: Container Re-Mux ──────────────────────────────────
+    remuxEnabled:     req.body.remuxEnabled === 'true',
+    remuxFormat:      (req.body.remuxFormat || 'mkv').trim(),
   };
 
-  // Output name for download — always use .mp4 for transform
+  // Output name: respect remux format if enabled, otherwise always .mp4 for transform
+  const downloadExt = mode === 'transform' && transformOptions.remuxEnabled
+    ? '.' + transformOptions.remuxFormat.replace(/^\./, '')
+    : '.mp4';
   const outputOriginalName = mode === 'transform'
-    ? path.basename(videoFile.originalname, originalExt) + '_transformed.mp4'
+    ? path.basename(videoFile.originalname, originalExt) + '_transformed' + downloadExt
     : videoFile.originalname;
 
   const jobData = {

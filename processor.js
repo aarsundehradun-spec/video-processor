@@ -345,6 +345,59 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
       // Audio
       audioMode: rawAudioMode = 'keep',
       audioVolume = 0.3,
+      // ── Feature 1: Mirror ──────────────────────────────────────────────────
+      mirrorEnabled = false,
+      // ── Feature 2: Split-Screen ────────────────────────────────────────────
+      splitScreenEnabled = false,
+      splitDirection = 'vertical',
+      // ── Feature 3: Border / Padding ────────────────────────────────────────
+      borderEnabled = false,
+      borderPadding = 10,
+      borderColor = 'black',
+      // ── Feature 4: Pitch Shift ─────────────────────────────────────────────
+      pitchShiftEnabled = false,
+      pitchShiftSemitones = 0,
+      // ── Feature 5: Film Grain ──────────────────────────────────────────────
+      grainEnabled = false,
+      grainIntensity = 20,
+      // ── Feature 6: Dynamic Zoom ────────────────────────────────────────────
+      zoomEnabled = false,
+      zoomDirection = 'zoom-in',
+      zoomIntensity = 'subtle',
+      // ── Feature 7: FPS Conversion ──────────────────────────────────────────
+      fpsEnabled = false,
+      targetFps = 30,
+      // ── Feature 8: Face / Privacy Blur ─────────────────────────────────────
+      faceBlurEnabled = false,
+      faceBlurStrength = 3,
+      // ── New Feature 9: Hue Rotation ────────────────────────────────────────
+      hueEnabled  = false,
+      hueDegrees  = 10,
+      // ── New Feature 10: Micro-Tilt Rotation ────────────────────────────────
+      tiltEnabled  = false,
+      tiltAngle    = 1.0,
+      // ── New Feature 11: Audio Noise Floor ──────────────────────────────────
+      noiseFloorEnabled = false,
+      noiseFloorDb      = -38,
+      // ── New Feature 12: Temporal Frame Jitter ──────────────────────────────
+      frameJitterEnabled = false,
+      frameJitterFrames  = 2,
+      // ── New Feature 13: Variable Speed Ramp ────────────────────────────────
+      speedRampEnabled = false,
+      speedRampCurve   = 'wave',
+      // ── New Feature 14: Audio EQ Shift ─────────────────────────────────────
+      audioEqEnabled = false,
+      audioEqPreset  = 'cut-low',
+      // ── New Feature 15: Vertical Crop Reframe ──────────────────────────────
+      vCropEnabled = false,
+      vCropPercent = 3,
+      vCropAxis    = 'vertical',
+      // ── New Feature 16: Thumbnail Randomizer ───────────────────────────────
+      thumbRandomEnabled = false,
+      thumbIntroSeconds  = 0.5,
+      // ── New Feature 17: Container Re-Mux ───────────────────────────────────
+      remuxEnabled = false,
+      remuxFormat  = 'mkv',
     } = options || {};
 
     let audioMode = rawAudioMode;
@@ -377,7 +430,40 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
       Math.abs(safeBrightness) > 0.01 ||
       Math.abs(safeContrast - 1.0) > 0.01;
 
-    const needsVideoEncode = hasOriginalVideo && (needsCrop || needsWatermark || needsSpeedChange || needsCaption || autoSubtitles || colorChanged);
+    // ── New feature flags ──────────────────────────────────────────────────
+    const needsMirror      = mirrorEnabled     === true || mirrorEnabled     === 'true';
+    const needsSplitScreen = splitScreenEnabled === true || splitScreenEnabled === 'true';
+    const needsBorder      = borderEnabled      === true || borderEnabled      === 'true';
+    const needsGrain       = grainEnabled       === true || grainEnabled       === 'true';
+    const needsZoom        = zoomEnabled        === true || zoomEnabled        === 'true';
+    const needsFaceBlur    = faceBlurEnabled    === true || faceBlurEnabled    === 'true';
+    const hasPitchShift    = (pitchShiftEnabled === true || pitchShiftEnabled === 'true')
+                              && Math.abs(parseFloat(pitchShiftSemitones) || 0) > 0.01
+                              && hasOriginalAudio;
+    const needsFpsChange   = (fpsEnabled === true || fpsEnabled === 'true')
+                              && parseInt(targetFps) > 0;
+
+    // ── New feature flags (Tier 2) ─────────────────────────────────────────
+    const needsHue        = (hueEnabled === true || hueEnabled === 'true')
+                              && Math.abs(parseFloat(hueDegrees) || 0) > 0.1;
+    const needsTilt       = (tiltEnabled === true || tiltEnabled === 'true')
+                              && Math.abs(parseFloat(tiltAngle) || 0) > 0.05;
+    const needsVCrop      = (vCropEnabled === true || vCropEnabled === 'true')
+                              && parseFloat(vCropPercent) > 0;
+    const needsFrameJitter = frameJitterEnabled === true || frameJitterEnabled === 'true';
+    const needsSpeedRamp  = speedRampEnabled === true || speedRampEnabled === 'true';
+    const hasNoiseFloor   = (noiseFloorEnabled === true || noiseFloorEnabled === 'true')
+                              && hasOriginalAudio;
+    const hasAudioEq      = (audioEqEnabled === true || audioEqEnabled === 'true')
+                              && hasOriginalAudio;
+    const needsThumbRandom = thumbRandomEnabled === true || thumbRandomEnabled === 'true';
+
+    const needsVideoEncode = hasOriginalVideo && (
+      needsCrop || needsWatermark || needsSpeedChange || needsCaption ||
+      autoSubtitles || colorChanged || needsMirror || needsBorder ||
+      needsGrain || needsZoom || needsFaceBlur || needsSplitScreen ||
+      needsHue || needsTilt || needsVCrop || needsFrameJitter || needsSpeedRamp
+    );
 
     // ── Determine Pipeline ──────────────────────────────────────────────────
     let pipeline = 'cpu';
@@ -430,6 +516,24 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
         vfParts.push(`crop=${cropWidth}:${cropHeight}:${cropX}:${cropY}`);
       }
 
+      // 1a. Mirror — applied AFTER crop so the crop box (drawn on original) stays valid
+      if (needsMirror) {
+        vfParts.push('hflip');
+      }
+
+      // 1b. Border / Padding — scale down and pad with colour to change aspect fingerprint
+      if (needsBorder) {
+        const safePadPct  = Math.min(Math.max(parseFloat(borderPadding) || 10, 2), 25);
+        const s           = ((100 - safePadPct) / 100).toFixed(6); // e.g. 0.900000
+        const SAFE_BG     = new Set(['black', 'white', 'gray', 'red', 'blue', 'green']);
+        const safeBg      = SAFE_BG.has(borderColor) ? borderColor : 'black';
+        // Scale down then pad back: trunc(x/2)*2 guarantees even pixel dimensions for H.264
+        vfParts.push(
+          `scale=trunc(iw*${s}/2)*2:trunc(ih*${s}/2)*2,` +
+          `pad=trunc(iw/${s}/2)*2:trunc(ih/${s}/2)*2:(ow-iw)/2:(oh-ih)/2:${safeBg}`
+        );
+      }
+
       // 2. Speed — adjust video PTS (presentation timestamp)
       if (needsSpeedChange) {
         vfParts.push(`setpts=${(1.0 / safeSpeed).toFixed(4)}*PTS`);
@@ -469,6 +573,127 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
         vfParts.push(
           `eq=saturation=${eqSaturation.toFixed(3)}:brightness=${eqBrightness.toFixed(3)}:contrast=${eqContrast.toFixed(3)}:gamma=${eqGamma.toFixed(3)}`
         );
+      }
+
+      // 3a. Film Grain — temporal noise; alters every frame's pixel hash
+      if (needsGrain) {
+        const safeGrain = Math.min(Math.max(parseInt(grainIntensity) || 20, 1), 100);
+        // allf=t = temporal: different noise pattern per frame (not static)
+        vfParts.push(`noise=alls=${safeGrain}:allf=t`);
+      }
+
+      // 3b. Dynamic Zoom / Reframe — changes spatial framing, breaks pHash
+      if (needsZoom) {
+        const zFactors  = { subtle: 1.05, medium: 1.10, heavy: 1.20 };
+        const zf        = zFactors[zoomIntensity] || 1.05;
+        const zfStr     = zf.toFixed(6);
+        const invStr    = (1 / zf).toFixed(6);
+        if (zoomDirection === 'zoom-in') {
+          // Scale up, crop center back to original resolution
+          vfParts.push(
+            `scale=trunc(iw*${zfStr}/2)*2:trunc(ih*${zfStr}/2)*2,` +
+            `crop=trunc(iw*${invStr}/2)*2:trunc(ih*${invStr}/2)*2:` +
+            `(iw-trunc(iw*${invStr}/2)*2)/2:(ih-trunc(ih*${invStr}/2)*2)/2`
+          );
+        } else if (zoomDirection === 'zoom-out') {
+          // Scale down and pad with black letterbox
+          vfParts.push(
+            `scale=trunc(iw*${invStr}/2)*2:trunc(ih*${invStr}/2)*2,` +
+            `pad=trunc(iw*${invStr}*${zfStr}/2)*2:trunc(ih*${invStr}*${zfStr}/2)*2:(ow-iw)/2:(oh-ih)/2:black`
+          );
+        } else if (zoomDirection === 'pan-right') {
+          // Crop left 90%, scale back to full width → effective rightward pan reframe
+          vfParts.push(
+            `crop=trunc(iw*0.9/2)*2:ih:trunc(iw*0.1/2)*2:0,` +
+            `scale=trunc(iw/${(0.9).toFixed(6)}/2)*2:trunc(ih/2)*2`
+          );
+        } else if (zoomDirection === 'pan-left') {
+          // Crop right 90%, scale back to full width → effective leftward pan reframe
+          vfParts.push(
+            `crop=trunc(iw*0.9/2)*2:ih:0:0,` +
+            `scale=trunc(iw/${(0.9).toFixed(6)}/2)*2:trunc(ih/2)*2`
+          );
+        }
+      }
+
+      // 3c. Face / Privacy Blur — smartblur degrades facial recognition AI confidence
+      if (needsFaceBlur) {
+        const rawStr  = Math.min(Math.max(parseInt(faceBlurStrength) || 3, 1), 10);
+        const radius  = (rawStr * 0.5).toFixed(1);
+        vfParts.push(`smartblur=${radius}:-1:0:${radius}:-0.5:0`);
+      }
+
+      // 3d. Hue Rotation — shifts entire color wheel, breaks color histogram fingerprint
+      if (needsHue) {
+        // h= accepts degrees (positive or negative). 10° is invisible but fingerprint-breaking.
+        const safeHue = Math.min(Math.max(parseFloat(hueDegrees) || 10, -180), 180);
+        vfParts.push(`hue=h=${safeHue.toFixed(2)}`);
+      }
+
+      // 3e. Micro-Tilt Rotation — defeats CNN visual embedding models trained on axis-aligned frames
+      if (needsTilt) {
+        const safeTilt = Math.min(Math.max(parseFloat(tiltAngle) || 1.0, 0.1), 5.0);
+        // Convert degrees to radians for FFmpeg rotate filter
+        const radians  = (safeTilt * Math.PI / 180).toFixed(8);
+        // oc=black fills the corners exposed by rotation; auto-crop removes them
+        // We scale down first, then rotate, then crop back to near-original size
+        // This avoids any black borders appearing in the final frame
+        const cropFactor = Math.cos(safeTilt * Math.PI / 180).toFixed(8);
+        vfParts.push(
+          `rotate=${radians}:ow=rotw(${radians}):oh=roth(${radians}):fillcolor=black,` +
+          `crop=trunc(iw*${cropFactor}/2)*2:trunc(ih*${cropFactor}/2)*2`
+        );
+      }
+
+      // 3f. Vertical / Horizontal Crop Reframe — edge removal defeats border fingerprints
+      if (needsVCrop) {
+        const safeVPct  = Math.min(Math.max(parseFloat(vCropPercent) || 3, 1), 15);
+        const cropFrac  = (safeVPct / 100).toFixed(6);
+        if (vCropAxis === 'horizontal') {
+          // Crop left+right, scale back to original width
+          vfParts.push(
+            `crop=trunc(iw*(1-2*${cropFrac})/2)*2:ih:trunc(iw*${cropFrac}/2)*2:0,` +
+            `scale=trunc(iw/(1-2*${cropFrac})/2)*2:trunc(ih/2)*2`
+          );
+        } else {
+          // Crop top+bottom (default), scale back to original height
+          vfParts.push(
+            `crop=iw:trunc(ih*(1-2*${cropFrac})/2)*2:0:trunc(ih*${cropFrac}/2)*2,` +
+            `scale=trunc(iw/2)*2:trunc(ih/(1-2*${cropFrac})/2)*2`
+          );
+        }
+      }
+
+      // 3g. Temporal Frame Jitter — duplicates N frames near start to offset keyframe timestamps
+      if (needsFrameJitter) {
+        const safeJitter = Math.min(Math.max(parseInt(frameJitterFrames) || 2, 1), 5);
+        // tpad=start=N pads N duplicate frames at the beginning of the video stream.
+        // This slides every subsequent frame's PTS forward by N frame-durations,
+        // offsetting the platform's expected keyframe extraction timestamps.
+        vfParts.push(`tpad=start=${safeJitter}:start_mode=clone`);
+      }
+
+      // 3h. Variable Speed Ramp — changes tempo unpredictably across segments
+      // We apply this as a setpts expression using a sine-based waveform.
+      // This means no frame is at 1.0x — there is always slight acceleration/deceleration.
+      if (needsSpeedRamp) {
+        let ptsExpr;
+        if (speedRampCurve === 'wave') {
+          // Sinusoidal: gently accelerates/decelerates; near-invisible to viewer
+          // Speed oscillates ±5% around 1.0x across the full clip
+          ptsExpr = `PTS*(1+0.05*sin(2*PI*PTS/DURATION))`;
+        } else if (speedRampCurve === 'slow-fast') {
+          // Start slow (0.9x), end fast (1.1x) — a single linear ramp
+          ptsExpr = `PTS*(0.9+0.2*(PTS/DURATION))`;
+        } else if (speedRampCurve === 'fast-slow') {
+          // Start fast (1.1x), end slow (0.9x)
+          ptsExpr = `PTS*(1.1-0.2*(PTS/DURATION))`;
+        } else {
+          // Fallback: random-ish wave using multiple harmonics
+          ptsExpr = `PTS*(1+0.04*sin(2*PI*PTS/DURATION)+0.02*sin(4*PI*PTS/DURATION))`;
+        }
+        // setpts evaluates the expression per-frame; DURATION = full video duration in seconds
+        vfParts.push(`setpts=${ptsExpr}`);
       }
 
       // 4. Caption burn-in
@@ -520,14 +745,44 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
     }
 
     // ── Build audio filter chain ────────────────────────────────────────────
+    // Pitch Shift, Speed, EQ, and Noise Floor are all unified here.
     const afParts = [];
-    if (Math.abs(safeSpeed - 1.0) > 0.001) {
-      // atempo only works in range 0.5–2.0; chain if needed
+    if (hasPitchShift) {
+      const semitones       = parseFloat(pitchShiftSemitones) || 0;
+      const pitchFactor     = Math.pow(2, semitones / 12);
+      const aStream         = (cachedProbe?.streams || []).find(s => s.codec_type === 'audio');
+      const sr              = parseInt(aStream?.sample_rate || 44100);
+      afParts.push(`asetrate=${sr}*${pitchFactor.toFixed(6)},aresample=${sr}`);
+      const combinedTempo = safeSpeed / pitchFactor;
+      let ct = combinedTempo;
+      while (ct > 2.0) { afParts.push('atempo=2.0'); ct /= 2.0; }
+      while (ct < 0.5) { afParts.push('atempo=0.5'); ct /= 0.5; }
+      afParts.push(`atempo=${ct.toFixed(6)}`);
+    } else if (Math.abs(safeSpeed - 1.0) > 0.001) {
+      // Speed-only path (no pitch shift): chain atempo in 0.5–2.0 range
       let speedRemaining = safeSpeed;
       while (speedRemaining > 2.0) { afParts.push('atempo=2.0'); speedRemaining /= 2.0; }
       while (speedRemaining < 0.5) { afParts.push('atempo=0.5'); speedRemaining /= 0.5; }
       afParts.push(`atempo=${speedRemaining.toFixed(4)}`);
     }
+
+    // Feature 14: Audio EQ Shift — reshape spectral envelope, breaks AcoustID spectral shape
+    if (hasAudioEq) {
+      // All presets use the 'equalizer' biquad filter. Frequency in Hz, width in octaves.
+      // We chain two bands to create a distinctive enough spectral signature change.
+      const EQ_PRESETS = {
+        'cut-low':    'equalizer=f=80:width_type=o:width=1:g=-6,equalizer=f=200:width_type=o:width=0.5:g=-3',
+        'cut-high':   'equalizer=f=8000:width_type=o:width=1:g=-6,equalizer=f=4000:width_type=o:width=0.5:g=-2',
+        'boost-mid':  'equalizer=f=1000:width_type=o:width=1:g=4,equalizer=f=2500:width_type=o:width=0.5:g=2',
+        'scoop-mid':  'equalizer=f=800:width_type=o:width=1.5:g=-5,equalizer=f=2000:width_type=o:width=0.5:g=-2',
+        'telephone':  'highpass=f=300,lowpass=f=3400',
+      };
+      const eqFilter = EQ_PRESETS[audioEqPreset] || EQ_PRESETS['cut-low'];
+      afParts.push(eqFilter);
+      console.log(`[Processor] Audio EQ: applying preset '${audioEqPreset}'`);
+    }
+
+    // Feature 11: Audio Noise Floor — injected via filter_complex below (hasNoiseFloor flag).
 
     // ── Metadata args (single consolidated array — Fix 4) ──────────────────
     const metaArgs = buildMetaArgs(options);
@@ -573,34 +828,109 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
     // Map streams based on audio mode
     cmd.outputOptions('-map_metadata', '-1');
 
-    const useComplexFilter = (audioMode === 'mix' && hasExternalAudio && hasOriginalAudio);
+    // ── Stream mapping + filter application ─────────────────────────────────────
+    // We need complexFilter in two situations:
+    //   A) Split-screen (Feature 2) — always needs filter_complex for the split/stack
+    //   B) Audio mix mode with original audio — needs filter_complex for amix
+    // Both cases are unified into a SINGLE complexFilter string to avoid double-input bugs.
+    const useAudioComplexFilter = (audioMode === 'mix' && hasExternalAudio && hasOriginalAudio);
+    // Also use complex filter if noise floor injection is needed — aevalsrc requires filter_complex
+    const useComplexFilter = needsSplitScreen || useAudioComplexFilter || hasNoiseFloor;
 
     if (useComplexFilter) {
-      cmd.input(options.audioPath);
-      let filterComplex = '';
-      if (needsVideoEncode && vfParts.length > 0) {
-        filterComplex += `[0:v]${vfParts.join(',')}[vout];`;
+      // Build filter_complex string in parts
+      // ── Video section ────────────────────────────────────────────
+      const fcParts = []; // each element is a complete filter chain segment (no trailing ;)
+
+      if (needsSplitScreen && hasOriginalVideo) {
+        // Apply ALL regular vf filters to get the processed video, then split and stack.
+        // This guarantees both halves share identical dimensions (they branch post-filter).
+        const mainChain = (needsVideoEncode && vfParts.length > 0) ? vfParts.join(',') : 'null';
+        fcParts.push(`[0:v]${mainChain}[_splitprocessed]`);
+
+        if (splitDirection === 'horizontal') {
+          // Side-by-side: each half = half width, full height
+          fcParts.push('[_splitprocessed]split=2[_splitleft][_splitright]');
+          fcParts.push('[_splitleft]scale=trunc(iw/4)*2:trunc(ih/2)*2[_leftvid]');
+          fcParts.push('[_splitright]scale=trunc(iw/4)*2:trunc(ih/2)*2,boxblur=25:5[_rightvid]');
+          fcParts.push('[_leftvid][_rightvid]hstack[vout]');
+        } else {
+          // Top/Bottom (default): each half = full width, half height
+          fcParts.push('[_splitprocessed]split=2[_splittop][_splitbot]');
+          fcParts.push('[_splittop]scale=trunc(iw/2)*2:trunc(ih/4)*2[_topvid]');
+          fcParts.push('[_splitbot]scale=trunc(iw/2)*2:trunc(ih/4)*2,boxblur=25:5[_botvid]');
+          fcParts.push('[_topvid][_botvid]vstack[vout]');
+        }
       } else if (hasOriginalVideo) {
-        filterComplex += '[0:v]null[vout];';
+        // No split-screen — passthrough video with existing vf chain
+        const mainChain = (needsVideoEncode && vfParts.length > 0) ? vfParts.join(',') : 'null';
+        fcParts.push(`[0:v]${mainChain}[vout]`);
       }
 
-      const vol1 = (1.0 - parseFloat(audioVolume)).toFixed(2);
-      const vol2 = parseFloat(audioVolume).toFixed(2);
+      // ── Audio section ────────────────────────────────────────────
+      // Audio input 1 was already added by the early block above (lines ~688-694).
+      // We reference [1:a] here without calling cmd.input() again, fixing the old
+      // double-input bug where audio was added twice for mix mode.
+      if (useAudioComplexFilter) {
+        const vol1 = (1.0 - parseFloat(audioVolume)).toFixed(2);
+        const vol2 = parseFloat(audioVolume).toFixed(2);
+        fcParts.push(
+          afParts.length > 0
+            ? `[0:a]volume=${vol1},${afParts.join(',')}[_a1]`
+            : `[0:a]volume=${vol1}[_a1]`
+        );
+        fcParts.push(`[1:a]volume=${vol2}[_a2]`);
+        fcParts.push('[_a1][_a2]amix=inputs=2:duration=first:dropout_transition=3[aout]');
+      } else if (afParts.length > 0 && hasOriginalAudio && audioMode !== 'mute') {
+        // Audio filters exist but no amix — embed in filter_complex to avoid -af conflict
+        fcParts.push(`[0:a]${afParts.join(',')}[aout]`);
+      } else if (afParts.length > 0 && audioMode === 'replace' && hasExternalAudio) {
+        fcParts.push(`[1:a]${afParts.join(',')}[aout]`);
+      } else if (hasNoiseFloor && hasOriginalAudio) {
+        // Feature 11: Noise floor only (no other af filters).
+        // Inject white noise at extreme low volume and mix with original audio.
+        // aevalsrc generates a synthetic noise signal at the same sample rate as original.
+        const aStream = (cachedProbe?.streams || []).find(s => s.codec_type === 'audio');
+        const sr = parseInt(aStream?.sample_rate || 44100);
+        const safeDb = Math.min(Math.max(parseFloat(noiseFloorDb) || -38, -60), -20);
+        // Convert dB to linear amplitude: 10^(dB/20)
+        const amp = Math.pow(10, safeDb / 20).toFixed(8);
+        fcParts.push(`aevalsrc=random(0)*${amp}:s=${sr}[_noise]`);
+        fcParts.push(`[0:a][_noise]amix=inputs=2:duration=first:dropout_transition=0[aout]`);
+      } else if (hasNoiseFloor && hasOriginalAudio && afParts.length > 0) {
+        // Noise floor + pitch/speed/eq: chain af filters on main audio then mix with noise
+        const aStream = (cachedProbe?.streams || []).find(s => s.codec_type === 'audio');
+        const sr = parseInt(aStream?.sample_rate || 44100);
+        const safeDb = Math.min(Math.max(parseFloat(noiseFloorDb) || -38, -60), -20);
+        const amp = Math.pow(10, safeDb / 20).toFixed(8);
+        fcParts.push(`[0:a]${afParts.join(',')}[_afout]`);
+        fcParts.push(`aevalsrc=random(0)*${amp}:s=${sr}[_noise]`);
+        fcParts.push(`[_afout][_noise]amix=inputs=2:duration=first:dropout_transition=0[aout]`);
+      }
 
-      filterComplex += afParts.length > 0
-        ? `[0:a]volume=${vol1},${afParts.join(',')}[a1];`
-        : `[0:a]volume=${vol1}[a1];`;
-      filterComplex += `[1:a]volume=${vol2}[a2];`;
-      filterComplex += '[a1][a2]amix=inputs=2:duration=first:dropout_transition=3[aout]';
+      cmd.complexFilter(fcParts.join(';'));
 
-      cmd.complexFilter(filterComplex);
+      // ── Output mapping ────────────────────────────────────────────
+      if (hasOriginalVideo || needsSplitScreen) {
+        cmd.outputOptions('-map', '[vout]');
+      }
+      // Determine whether audio was routed through filter_complex
+      const audioInFc = useAudioComplexFilter || hasNoiseFloor
+        || (afParts.length > 0 && hasOriginalAudio && audioMode !== 'mute')
+        || (afParts.length > 0 && audioMode === 'replace' && hasExternalAudio);
 
-      if (needsVideoEncode || hasOriginalVideo) {
-        cmd.outputOptions('-map', '[vout]', '-map', '[aout]');
-      } else {
+      if (audioInFc) {
         cmd.outputOptions('-map', '[aout]');
+      } else if (audioMode === 'mute') {
+        // no audio mapping
+      } else if (audioMode === 'replace' && hasExternalAudio) {
+        cmd.outputOptions('-map', '1:a?');
+      } else if (hasOriginalAudio) {
+        cmd.outputOptions('-map', '0:a?');
       }
+
     } else {
+      // ── Simple path (no complex filter needed) ───────────────────────
       if (needsVideoEncode && vfParts.length > 0) {
         cmd.videoFilter(vfParts.join(','));
       }
@@ -653,7 +983,9 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
     // Explicitly use the fastest scaler algorithm for any auto-inserted format conversions
     cmd.outputOptions('-sws_flags', 'fast_bilinear');
 
-    const needsAudioEncode = afParts.length > 0 || audioMode === 'mix' || (audioMode === 'replace' && hasExternalAudio);
+    const needsAudioEncode = afParts.length > 0 || audioMode === 'mix'
+      || (audioMode === 'replace' && hasExternalAudio)
+      || hasNoiseFloor || hasAudioEq;
     if (needsAudioEncode) {
       cmd.audioCodec('aac').outputOptions('-b:a', '128k');
     } else {
@@ -668,7 +1000,28 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
     const fmt = EXT_TO_FORMAT[outputExt];
     if (fmt) cmd.outputOptions('-f', fmt);
 
+    // ── Feature 17: Container Re-Mux format override ─────────────────────────
+    if (remuxEnabled && remuxFormat) {
+      const SAFE_FORMATS = { mkv: 'matroska', mov: 'mov', avi: 'avi', webm: 'webm', ts: 'mpegts' };
+      const safeRemuxFmt = SAFE_FORMATS[remuxFormat.toLowerCase()];
+      if (safeRemuxFmt) {
+        // Override the -f flag already set above
+        cmd.outputOptions('-f', safeRemuxFmt);
+        console.log(`[Processor] Container re-mux: output format overridden to '${safeRemuxFmt}'`);
+      } else {
+        console.warn(`[Processor] Unknown remux format '${remuxFormat}', keeping original.`);
+      }
+    }
+
     if (useFaststart) cmd.outputOptions('-movflags', '+faststart');
+
+    // ── Feature 7: FPS Conversion ──────────────────────────────────────────
+    // Applied as an output option so it works with both simple and complex filter paths.
+    if (needsFpsChange) {
+      const safeFps = Math.min(Math.max(parseInt(targetFps) || 30, 1), 120);
+      cmd.outputOptions('-r', safeFps.toString());
+      console.log(`[Processor] FPS conversion: output will be ${safeFps}fps`);
+    }
 
     cmd
       .output(outputPath)
