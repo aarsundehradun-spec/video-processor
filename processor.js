@@ -7,6 +7,22 @@ const ffmpeg = require('fluent-ffmpeg');
 const ffmpegStatic = require('./ffmpeg-path');
 const ffprobeStaticPath = require('./ffprobe-path');
 
+// ---------------------------------------------------------------------------
+// Active Jobs tracking (for cancellation)
+// ---------------------------------------------------------------------------
+const activeJobs = new Map();
+
+function cancelProcessing(jobId) {
+  const p = activeJobs.get(jobId);
+  if (p) {
+    console.log(`[Processor] Forcibly killing active job: ${jobId}`);
+    try { p.kill('SIGKILL'); } catch (err) { console.error('Error killing process:', err); }
+    activeJobs.delete(jobId);
+    return true;
+  }
+  return false;
+}
+
 // Point fluent-ffmpeg to the custom bundled binary if available, or static fallback
 ffmpeg.setFfmpegPath(ffmpegStatic);
 ffmpeg.setFfprobePath(ffprobeStaticPath);
@@ -177,7 +193,7 @@ const EXT_TO_FORMAT = {
   '.3gp': '3gp',
 };
 
-function replaceVideoMetadata(inputPath, outputPath, customMeta, updateProgress, outputExt) {
+function replaceVideoMetadata(jobId, inputPath, outputPath, customMeta, updateProgress, outputExt) {
   return new Promise((resolve, reject) => {
     const useFaststart = outputExt === '.mp4' || outputExt === '.m4v';
     const metaArgs = buildMetaArgs(customMeta);
@@ -217,15 +233,19 @@ function replaceVideoMetadata(inputPath, outputPath, customMeta, updateProgress,
         }
       })
       .on('end', () => {
+        if (jobId) activeJobs.delete(jobId);
         console.log(`[Processor] Video metadata replaced: ${path.basename(outputPath)}`);
         if (updateProgress) updateProgress(100);
         resolve(outputPath);
       })
       .on('error', (err) => {
+        if (jobId) activeJobs.delete(jobId);
         console.error('[Processor] FFmpeg error:', err.message);
         reject(err);
-      })
-      .run();
+      });
+
+    if (jobId) activeJobs.set(jobId, cmd);
+    cmd.run();
   });
 }
 
@@ -244,7 +264,7 @@ function replaceVideoMetadata(inputPath, outputPath, customMeta, updateProgress,
 const util = require('util');
 const ffprobeAsync = util.promisify(ffmpeg.ffprobe);
 
-async function transformVideo(inputPath, outputPath, options, updateProgress, cachedProbe) {
+async function transformVideo(jobId, inputPath, outputPath, options, updateProgress, cachedProbe) {
   // Fix: reuse the ffprobe result from processFile — no second probe spawn
   let hasOriginalVideo = true;
   let hasOriginalAudio = true;
@@ -289,7 +309,10 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
         audioTempPath,
         '-y'
       ]);
+      if (jobId) activeJobs.set(jobId, p);
+
       p.on('close', code => {
+        if (jobId) activeJobs.delete(jobId);
         if (code === 0) resolve();
         else reject(new Error('Audio extraction failed'));
       });
@@ -1048,17 +1071,21 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
         }
       })
       .on('end', () => {
+        if (jobId) activeJobs.delete(jobId);
         console.log(`[Processor] Finished job for output: ${outputPath}`);
         if (updateProgress) updateProgress(100);
         if (captionFile) { try { fs.unlinkSync(captionFile); } catch {} }
         resolve(outputPath);
       })
       .on('error', (err) => {
+        if (jobId) activeJobs.delete(jobId);
         console.error('[Processor] FFmpeg transform error:', err.message);
         if (captionFile) { try { fs.unlinkSync(captionFile); } catch {} }
         reject(err);
-      })
-      .run();
+      });
+
+    if (jobId) activeJobs.set(jobId, cmd);
+    cmd.run();
   });
 }
 
@@ -1076,7 +1103,7 @@ function copyFile(inputPath, outputPath) {
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.flv', '.wmv', '.3gp']);
 
 async function processFile(job) {
-  const { inputPath, outputPath, mimeType, customMeta, transformOptions, mode } = job;
+  const { id, inputPath, outputPath, mimeType, customMeta, transformOptions, mode } = job;
   console.log(`[Processor] Processing mode="${mode}": ${mimeType} — file: ${path.basename(inputPath)}`);
 
   if (!fs.existsSync(inputPath)) {
@@ -1101,10 +1128,10 @@ async function processFile(job) {
 
   try {
     if (isVideo && mode === 'transform') {
-      await transformVideo(inputPath, outputPath, transformOptions, job.updateProgress, cachedProbe);
+      await transformVideo(id, inputPath, outputPath, transformOptions, job.updateProgress, cachedProbe);
     } else if (isVideo) {
       // Default: fast metadata-only mode (stream-copy)
-      await replaceVideoMetadata(inputPath, outputPath, customMeta, job.updateProgress, outputExt);
+      await replaceVideoMetadata(id, inputPath, outputPath, customMeta, job.updateProgress, outputExt);
     } else if (isJpeg) {
       await stripJpegMetadata(inputPath, outputPath);  // Fix 1: now async
       if (typeof job.updateProgress === 'function') job.updateProgress(100);
@@ -1127,4 +1154,4 @@ async function processFile(job) {
   return outputPath;
 }
 
-module.exports = { processFile };
+module.exports = { processFile, cancelProcessing };

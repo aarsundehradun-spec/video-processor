@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { processingQueue } = require('./queue');
+const { cancelProcessing } = require('./processor');
 
 const router = express.Router();
 
@@ -304,4 +305,33 @@ router.get('/download/:id', async (req, res) => {
   }
 });
 
-module.exports = { router };
+// Cancel job endpoint
+router.post('/cancel/:id', async (req, res) => {
+  const jobId = req.params.id;
+  try {
+    const job = await processingQueue.getJob(jobId);
+    if (job) {
+      const state = await job.getState();
+      if (state === 'active') {
+        // Try to forcibly kill the FFmpeg process running this job
+        cancelProcessing(jobId);
+      }
+      
+      // Attempt to remove it from the queue if it's waiting or delayed
+      try {
+        await job.remove();
+      } catch (err) {
+        // Job might be active and lock prevents removal, that's fine since we killed the process.
+      }
+    } else {
+      // Even if the job isn't in BullMQ, try to kill it just in case
+      cancelProcessing(jobId);
+    }
+    res.json({ message: 'Cancellation requested' });
+  } catch (error) {
+    console.error(`[Routes] Error cancelling job:`, error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+module.exports = router;

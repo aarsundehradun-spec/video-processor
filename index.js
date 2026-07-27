@@ -9,7 +9,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const fs = require('fs');
 
-const { router } = require('./routes');
+const router = require('./routes');
 
 // Global crash protection
 process.on('uncaughtException', (err) => {
