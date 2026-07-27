@@ -24,7 +24,9 @@ console.log('[Build-Whisper] Configuring CMake (no AVX512 for cloud compatibilit
 shell.cd(whisperDir);
 // Disable AVX512 variants — Render.com / most cloud VMs don't support them.
 // The binary will still use AVX2/FMA which is universally available on modern x86-64.
-const configCmd = 'cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_AVX512=OFF -DGGML_AVX512_VBMI=OFF -DGGML_AVX512_VNNI=OFF -DGGML_AVX512_BF16=OFF';
+// VERY IMPORTANT: We must pass -DGGML_NATIVE=OFF so the compiler does NOT use -march=native,
+// which would otherwise re-enable AVX512 if the build machine happens to support it.
+const configCmd = 'cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_AVX512=OFF -DGGML_AVX512_VBMI=OFF -DGGML_AVX512_VNNI=OFF -DGGML_AVX512_BF16=OFF';
 if (shell.exec(configCmd).code !== 0) {
   console.error('[Build-Whisper] CMake configuration failed.');
   process.exit(1);
