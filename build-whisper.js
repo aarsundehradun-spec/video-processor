@@ -14,14 +14,17 @@ if (!fs.existsSync(whisperDir)) {
 process.env.PATH = process.env.PATH + ':' + path.join(__dirname, 'node_modules', '.bin') + ':/opt/homebrew/bin:/usr/local/bin';
 
 const buildDir = path.join(whisperDir, 'build');
-if (fs.existsSync(buildDir) && fs.existsSync(path.join(buildDir, 'bin', 'whisper-cli'))) {
-  console.log('[Build-Whisper] Executable already built.');
-  process.exit(0);
+// Always do a clean rebuild to ensure the correct CPU flags are used.
+if (fs.existsSync(buildDir)) {
+  console.log('[Build-Whisper] Removing old build directory for clean rebuild...');
+  shell.rm('-rf', buildDir);
 }
 
-console.log('[Build-Whisper] Configuring CMake...');
+console.log('[Build-Whisper] Configuring CMake (no AVX512 for cloud compatibility)...');
 shell.cd(whisperDir);
-const configCmd = 'cmake -S . -B build -DCMAKE_BUILD_TYPE=Release';
+// Disable AVX512 variants — Render.com / most cloud VMs don't support them.
+// The binary will still use AVX2/FMA which is universally available on modern x86-64.
+const configCmd = 'cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_AVX512=OFF -DGGML_AVX512_VBMI=OFF -DGGML_AVX512_VNNI=OFF -DGGML_AVX512_BF16=OFF';
 if (shell.exec(configCmd).code !== 0) {
   console.error('[Build-Whisper] CMake configuration failed.');
   process.exit(1);
