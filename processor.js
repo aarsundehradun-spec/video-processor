@@ -1079,6 +1079,10 @@ async function processFile(job) {
   const { inputPath, outputPath, mimeType, customMeta, transformOptions, mode } = job;
   console.log(`[Processor] Processing mode="${mode}": ${mimeType} — file: ${path.basename(inputPath)}`);
 
+  if (!fs.existsSync(inputPath)) {
+    throw new Error(`Input file missing from disk: ${path.basename(inputPath)}. This usually happens if the server restarted (e.g., Render sleep or deployment) between upload and processing.`);
+  }
+
   const ext = path.extname(inputPath).toLowerCase();
   const isJpeg = mimeType === 'image/jpeg' || ext === '.jpg' || ext === '.jpeg';
   const isVideo = VIDEO_EXTENSIONS.has(ext) || (mimeType && mimeType.startsWith('video/'));
