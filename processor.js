@@ -521,7 +521,8 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
       }
 
       // 1a. Mirror — applied AFTER crop so the crop box (drawn on original) stays valid
-      if (needsMirror) {
+      const protectSubtitles = options.protectSubtitles === 'true' || options.protectSubtitles === true;
+      if (needsMirror && !protectSubtitles) {
         vfParts.push('hflip');
       }
 
@@ -839,36 +840,45 @@ async function transformVideo(inputPath, outputPath, options, updateProgress, ca
     // Both cases are unified into a SINGLE complexFilter string to avoid double-input bugs.
     const useAudioComplexFilter = (audioMode === 'mix' && hasExternalAudio && hasOriginalAudio);
     // Also use complex filter if noise floor injection is needed — aevalsrc requires filter_complex
-    const useComplexFilter = needsSplitScreen || useAudioComplexFilter || hasNoiseFloor;
+    const protectSubtitlesForComplex = options.protectSubtitles === 'true' || options.protectSubtitles === true;
+    const needsPartialMirror = needsMirror && protectSubtitlesForComplex;
+    const useComplexFilter = needsSplitScreen || useAudioComplexFilter || hasNoiseFloor || needsPartialMirror;
 
     if (useComplexFilter) {
       // Build filter_complex string in parts
       // ── Video section ────────────────────────────────────────────
       const fcParts = []; // each element is a complete filter chain segment (no trailing ;)
 
-      if (needsSplitScreen && hasOriginalVideo) {
-        // Apply ALL regular vf filters to get the processed video, then split and stack.
-        // This guarantees both halves share identical dimensions (they branch post-filter).
+      if (hasOriginalVideo) {
+        let currentVout = '[0:v]';
         const mainChain = (needsVideoEncode && vfParts.length > 0) ? vfParts.join(',') : 'null';
-        fcParts.push(`[0:v]${mainChain}[_splitprocessed]`);
+        
+        fcParts.push(`${currentVout}${mainChain}[_base]`);
+        currentVout = '[_base]';
 
-        if (splitDirection === 'horizontal') {
-          // Side-by-side: each half = half width, full height
-          fcParts.push('[_splitprocessed]split=2[_splitleft][_splitright]');
-          fcParts.push('[_splitleft]scale=trunc(iw/4)*2:trunc(ih/2)*2[_leftvid]');
-          fcParts.push('[_splitright]scale=trunc(iw/4)*2:trunc(ih/2)*2,boxblur=25:5[_rightvid]');
-          fcParts.push('[_leftvid][_rightvid]hstack[vout]');
-        } else {
-          // Top/Bottom (default): each half = full width, half height
-          fcParts.push('[_splitprocessed]split=2[_splittop][_splitbot]');
-          fcParts.push('[_splittop]scale=trunc(iw/2)*2:trunc(ih/4)*2[_topvid]');
-          fcParts.push('[_splitbot]scale=trunc(iw/2)*2:trunc(ih/4)*2,boxblur=25:5[_botvid]');
-          fcParts.push('[_topvid][_botvid]vstack[vout]');
+        if (needsPartialMirror) {
+          fcParts.push(`${currentVout}split=2[_top][_bot]`);
+          fcParts.push(`[_top]crop=iw:ih*0.8:0:0,hflip[_topf]`);
+          fcParts.push(`[_bot]crop=iw:ih*0.2:0:ih*0.8[_botf]`);
+          fcParts.push(`[_topf][_botf]vstack[_mirrored]`);
+          currentVout = '[_mirrored]';
         }
-      } else if (hasOriginalVideo) {
-        // No split-screen — passthrough video with existing vf chain
-        const mainChain = (needsVideoEncode && vfParts.length > 0) ? vfParts.join(',') : 'null';
-        fcParts.push(`[0:v]${mainChain}[vout]`);
+
+        if (needsSplitScreen) {
+          if (splitDirection === 'horizontal') {
+            fcParts.push(`${currentVout}split=2[_splitleft][_splitright]`);
+            fcParts.push(`[_splitleft]scale=trunc(iw/4)*2:trunc(ih/2)*2[_leftvid]`);
+            fcParts.push(`[_splitright]scale=trunc(iw/4)*2:trunc(ih/2)*2,boxblur=25:5[_rightvid]`);
+            fcParts.push(`[_leftvid][_rightvid]hstack[vout]`);
+          } else {
+            fcParts.push(`${currentVout}split=2[_splittop][_splitbot]`);
+            fcParts.push(`[_splittop]scale=trunc(iw/2)*2:trunc(ih/4)*2[_topvid]`);
+            fcParts.push(`[_splitbot]scale=trunc(iw/2)*2:trunc(ih/4)*2,boxblur=25:5[_botvid]`);
+            fcParts.push(`[_topvid][_botvid]vstack[vout]`);
+          }
+        } else {
+          fcParts.push(`${currentVout}copy[vout]`);
+        }
       }
 
       // ── Audio section ────────────────────────────────────────────
