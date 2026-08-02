@@ -12,11 +12,20 @@ class ASSRenderer(RendererBase):
         return f"{hours}:{minutes:02d}:{secs:05.2f}"
         
     def _hex_to_ass_bgr(self, hex_str: str) -> str:
-        hex_str = hex_str.lstrip('#')
+        hex_str = str(hex_str).lstrip('#').lower()
+        if hex_str == 'red': return "&H0000FF&"
+        if hex_str == 'green': return "&H00FF00&"
+        if hex_str == 'blue': return "&HFF0000&"
+        if hex_str == 'yellow': return "&H00FFFF&"
+        if hex_str == 'white': return "&HFFFFFF&"
+        if hex_str == 'black': return "&H000000&"
+        if hex_str == 'magenta': return "&HFF00FF&"
+        if hex_str == 'cyan': return "&HFFFF00&"
+        
         if len(hex_str) == 6:
             r, g, b = hex_str[0:2], hex_str[2:4], hex_str[4:6]
-            return f"&H00{b}{g}{r}&"
-        return "&H000000FF&" # Default red
+            return f"&H{b}{g}{r}&"
+        return "&H0000FF&" # Default red
 
     def render(self, context: PipelineContext):
         import time
@@ -81,11 +90,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                             if layer.type == 'circle':
                                 # Draw circle shape (using vector drawing)
                                 radius = int(max(w, h) / 2) + int(size)
-                                text = f"{{\\pos({cx},{cy})\\1c{ass_color}\\3c{ass_color}\\p1}}m 0 {-radius} b {radius} {-radius} {radius} {radius} 0 {radius} b {-radius} {radius} {-radius} {-radius} 0 {-radius}{{\\p0}}"
+                                text = f"{{\\pos({cx},{cy})\\1a&HFF&\\3a&H00&\\3c{ass_color}\\p1}}m 0 {-radius} b {radius} {-radius} {radius} {radius} 0 {radius} b {-radius} {radius} {-radius} {-radius} 0 {-radius}{{\\p0}}"
                                 f_out.write(f"Dialogue: 0,{start_str},{end_str},CircleStyle,,0,0,0,,{text}\n")
                             elif layer.type == 'arrow':
-                                offset = int(size) + 20
-                                text = f"{{\\pos({cx},{cy - offset})\\1c{ass_color}}}⬇"
+                                offset = int(size) + int(max(w, h) / 2) + 20
+                                text = f"{{\\pos({cx},{cy - offset})\\1a&H00&\\1c{ass_color}}}▼"
                                 f_out.write(f"Dialogue: 0,{start_str},{end_str},ArrowStyle,,0,0,0,,{text}\n")
                                 
             context.manifest.runtime.artifacts["ass"].append(f"{layer.id}.ass")
