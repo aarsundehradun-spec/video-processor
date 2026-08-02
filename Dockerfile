@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     python3 \
     python3-opencv \
+    fonts-liberation \
+    fontconfig \
     git \
     wget \
     curl \

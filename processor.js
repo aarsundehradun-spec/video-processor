@@ -1199,7 +1199,7 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
       console.log('[Processor] GPU unavailable\n[Processor] Falling back to libx264');
       cmd
         .videoCodec('libx264')
-        .outputOptions('-crf', '28', '-preset', 'ultrafast', '-profile:v', 'baseline', '-tune', 'fastdecode,zerolatency', '-pix_fmt', 'yuv420p', '-threads', '1');
+        .outputOptions('-crf', '22', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-threads', '1');
     } else if (pipeline === 'copy') {
       console.log('[Processor] Smart bypass enabled: Copying video stream instead of re-encoding');
       cmd.videoCodec('copy');
