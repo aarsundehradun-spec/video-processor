@@ -40,6 +40,7 @@ const upload = multer({
 }).fields([
   { name: 'file', maxCount: 1 },
   { name: 'audio', maxCount: 1 },
+  { name: 'splitOverlayVideo', maxCount: 1 },
 ]);
 
 // Upload endpoint
@@ -51,6 +52,7 @@ router.post('/upload', upload, async (req, res) => {
 
   const videoFile = files.file[0];
   const audioFile = files.audio ? files.audio[0] : null;
+  const splitOverlayVideoFile = files.splitOverlayVideo ? files.splitOverlayVideo[0] : null;
 
   const jobId = uuidv4();
   const inputPath = videoFile.path;
@@ -130,6 +132,28 @@ router.post('/upload', upload, async (req, res) => {
     // ── Feature 2: Split-Screen Underlay ───────────────────────────────────
     splitScreenEnabled: req.body.splitScreenEnabled === 'true',
     splitDirection:     (req.body.splitDirection || 'vertical').trim(),
+    splitOverlayVideoPath: splitOverlayVideoFile ? splitOverlayVideoFile.path : null,
+
+    // ── Tracker Feature ────────────────────────────────────────────────────
+    trackerEnabled:   req.body.trackerEnabled === 'true',
+    trackerShape:     (req.body.trackerShape || 'circle').trim(),
+    trackerStartX:    parseFloat(req.body.trackerStartX || '0'),
+    trackerStartY:    parseFloat(req.body.trackerStartY || '0'),
+    trackerEndX:      parseFloat(req.body.trackerEndX || '0'),
+    trackerEndY:      parseFloat(req.body.trackerEndY || '0'),
+    trackerStartTime: parseFloat(req.body.trackerStartTime || '0'),
+    trackerEndTime:   parseFloat(req.body.trackerEndTime || '10'),
+    trackerSize:      parseInt(req.body.trackerSize || '50', 10),
+    trackerColor:     (req.body.trackerColor || 'red').trim(),
+
+    // AI Tracker Feature
+    aiTrackerEnabled: req.body.aiTrackerEnabled === 'true',
+    trackedObjects: (() => {
+      if (req.body.aiTrackerEnabled === 'true' && req.body.trackedObjects) {
+        try { return JSON.parse(req.body.trackedObjects); } catch (e) { console.error("Failed to parse trackedObjects:", e); }
+      }
+      return [];
+    })(),
 
     // ── Feature 3: Border / Padding ────────────────────────────────────────
     borderEnabled: req.body.borderEnabled === 'true',

@@ -338,6 +338,116 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
     }
   }
 
+  // ── AI Tracker Execution (V2.2 Manifest-driven) ──────────────────────
+  const aiTrackerEnabled = options.aiTrackerEnabled === 'true' || options.aiTrackerEnabled === true;
+  const trackedObjects = options.trackedObjects || [];
+  const aiTrackerAssPaths = [];
+  
+  if (aiTrackerEnabled && trackedObjects.length > 0 && hasOriginalVideo) {
+    if (updateProgress) updateProgress(10);
+    console.log(`[Processor] Running V2.2 AI Object Tracker Pipeline...`);
+    const crypto = require('crypto');
+    const jobIdDir = path.join(__dirname, 'disk_tmp', `tracking-v2-${crypto.randomUUID()}`);
+    fs.mkdirSync(jobIdDir, { recursive: true });
+    
+    // 1. Build the manifest
+    const manifestPath = path.join(jobIdDir, 'manifest.json');
+    const manifest = {
+      schema: "tracking-v2.2",
+      features: {
+          multiTracking: true,
+          detector: false,
+          kalman: false,
+          gpu: false,
+          parallelRenderer: false,
+          debug: true
+      },
+      config: {
+          video: inputPath,
+          trackers: [],
+          layers: []
+      },
+      runtime: {
+          status: {},
+          statistics: {},
+          artifacts: {},
+          events: [],
+          progress: {}
+      }
+    };
+    
+    for (let i = 0; i < trackedObjects.length; i++) {
+        const obj = trackedObjects[i];
+        const targetId = `target_${i.toString().padStart(3, '0')}`;
+        const layerId = `layer_${i.toString().padStart(3, '0')}`;
+        
+        // ReactCrop sends pixel coords, but we need percentages for V2 config.
+        // Wait, earlier we sent bounding boxes. Let's see how they are structured.
+        // Assuming [x, y, w, h] as percentages directly if passed from frontend properly.
+        // If they are pixels, Python needs to know. For safety, we pass the raw bbox
+        // array to bbox_percent as our frontend sends percentages out of 100.
+        manifest.config.trackers.push({
+            id: targetId,
+            profile: obj.trackerProfile || 'BALANCED',
+            start_time: obj.timestamp || 0,
+            end_time: 999999.0, // track until end for now
+            bbox_percent: obj.bbox // Expected to be [x,y,w,h] in % (0-100)
+        });
+        
+        manifest.config.layers.push({
+            id: layerId,
+            target_id: targetId,
+            type: obj.overlay || 'circle',
+            color: obj.shape_color || 'red',
+            size: obj.size || 50
+        });
+    }
+    
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+    
+    // 2. Execute Python Pipeline
+    console.log(`[Processor] Spawning Python TrackingEngine...`);
+    await new Promise((resolve, reject) => {
+        const p = spawn('python3', [ 
+          '-m', 'tracking',
+          '--manifest', manifestPath,
+          '--render-all'
+        ], { cwd: __dirname });
+        
+        // Capture stdout for progress
+        p.stdout.on('data', (data) => {
+            console.log(`[Python Tracker] ${data.toString().trim()}`);
+        });
+        
+        p.stderr.on('data', (data) => {
+            console.error(`[Python Tracker ERR] ${data.toString().trim()}`);
+        });
+        
+        if (jobId) activeJobs.set(`${jobId}-tracking`, p);
+        
+        p.on('close', code => {
+            if (jobId) activeJobs.delete(`${jobId}-tracking`);
+            if (code === 0) resolve();
+            else reject(new Error(`Tracking pipeline failed with code ${code}`));
+        });
+    });
+    
+    // 3. Read output manifest to collect artifacts
+    const outputManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const artifacts = outputManifest.runtime.artifacts || {};
+    const assFiles = artifacts.ass || [];
+    
+    for (const assName of assFiles) {
+        const fullPath = path.join(jobIdDir, assName);
+        if (fs.existsSync(fullPath)) {
+            aiTrackerAssPaths.push(fullPath);
+        }
+    }
+    
+    if (updateProgress) updateProgress(20);
+    console.log(`[Processor] AI Tracker finished. Found ${aiTrackerAssPaths.length} overlay layers.`);
+  }
+
   return new Promise((resolve, reject) => {
     const {
       // Trim
@@ -425,6 +535,18 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
       // ── New Feature 17: Container Re-Mux ───────────────────────────────────
       remuxEnabled = false,
       remuxFormat  = 'mkv',
+      // ── Tracker Feature ────────────────────────────────────────────────────
+      trackerEnabled = false,
+      trackerShape = 'circle',
+      trackerStartX = 0,
+      trackerStartY = 0,
+      trackerEndX = 0,
+      trackerEndY = 0,
+      trackerStartTime = 0,
+      trackerEndTime = 10,
+      trackerSize = 50,
+      trackerColor = 'red',
+      splitOverlayVideoPath = null,
     } = options || {};
 
     let audioMode = rawAudioMode;
@@ -484,12 +606,15 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
     const hasAudioEq      = (audioEqEnabled === true || audioEqEnabled === 'true')
                               && hasOriginalAudio;
     const needsThumbRandom = thumbRandomEnabled === true || thumbRandomEnabled === 'true';
+    const needsTracker = trackerEnabled === true || trackerEnabled === 'true';
+    const hasSplitOverlay = needsSplitScreen && options && options.splitOverlayVideoPath && fs.existsSync(options.splitOverlayVideoPath);
+    const hasAiTracker = aiTrackerAssPaths.length > 0;
 
     const needsVideoEncode = hasOriginalVideo && (
       needsCrop || needsWatermark || needsSpeedChange || needsCaption ||
       autoSubtitles || colorChanged || needsMirror || needsBorder ||
       needsGrain || needsZoom || needsFaceBlur || needsSplitScreen ||
-      needsHue || needsTilt || needsVCrop || needsFrameJitter || needsSpeedRamp
+      needsHue || needsTilt || needsVCrop || needsFrameJitter || needsSpeedRamp || needsTracker || hasAiTracker
     );
 
     // ── Determine Pipeline ──────────────────────────────────────────────────
@@ -730,6 +855,38 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
         vfParts.push(`setpts=${ptsExpr}`);
       }
 
+      // 3.5 Tracker Animation
+      if (needsTracker) {
+         const sT = parseFloat(trackerStartTime) || 0;
+         let eT = parseFloat(trackerEndTime) || 10;
+         if (eT <= sT) eT = sT + 1; // avoid division by zero
+         
+         const sX = parseFloat(trackerStartX) || 0;
+         const sY = parseFloat(trackerStartY) || 0;
+         const eX = parseFloat(trackerEndX) || 0;
+         const eY = parseFloat(trackerEndY) || 0;
+         
+         const xExpr = `if(lt(t\\,${sT})\\,${sX}\\,if(gt(t\\,${eT})\\,${eX}\\,${sX}+(${eX}-${sX})*(t-${sT})/(${eT}-${sT})))`;
+         const yExpr = `if(lt(t\\,${sT})\\,${sY}\\,if(gt(t\\,${eT})\\,${eY}\\,${sY}+(${eY}-${sY})*(t-${sT})/(${eT}-${sT})))`;
+         
+         const shape = trackerShape === 'arrow' ? '➔' : '⭕';
+         const size = parseInt(trackerSize, 10) || 50;
+         const ALLOWED_COLORS = new Set(['red', 'green', 'blue', 'yellow', 'white', 'black', 'magenta', 'cyan']);
+         const safeColor = ALLOWED_COLORS.has(trackerColor) ? trackerColor : 'red';
+         
+         const crypto = require('crypto');
+         const outputsDir = path.join(__dirname, 'disk_tmp', 'meta-remover-outputs');
+         const trackerFile = path.join(outputsDir, `tracker-${crypto.randomUUID()}.txt`);
+         fs.writeFileSync(trackerFile, shape, 'utf8');
+         
+         const localFont = path.join(__dirname, 'bin', 'Roboto-Bold.ttf');
+         const fontPath = process.platform === 'darwin'
+          ? '/System/Library/Fonts/Helvetica.ttc'
+          : (fs.existsSync(localFont) ? localFont : '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf');
+
+         vfParts.push(`drawtext=textfile='${trackerFile.replace(/\\/g, '/')}':fontsize=${size}:fontcolor=${safeColor}:x='${xExpr}':y='${yExpr}':fontfile='${fontPath}'`);
+      }
+
       // 4. Caption burn-in
       if (needsCaption) {
         // Write caption to a text file to bypass FFmpeg's fragile filtergraph escaping rules.
@@ -767,6 +924,14 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
         console.log(`[Processor DEBUG] safeSrtPath: ${safeSrtPath}`);
         vfParts.push(`subtitles='${safeSrtPath}'`);
         console.log(`[Processor DEBUG] vfParts after push:`, vfParts);
+      }
+      
+      // 6. AI Tracker Subtitles
+      if (hasAiTracker) {
+        for (const assPath of aiTrackerAssPaths) {
+           const safeAssPath = assPath.replace(/\\/g, '/').replace(/:/g, '\\:');
+           vfParts.push(`subtitles='${safeAssPath}'`);
+        }
       }
     } // end if (needsVideoEncode)
 
@@ -842,15 +1007,25 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
       cmd.inputOptions('-ss', `${parseFloat(trimStart)}`);
     }
 
+    let currentInputIndex = 0; // main video is 0
+    let externalAudioIndex = -1;
+    let splitOverlayVideoIndex = -1;
+
     // Fix 3: Add external audio input FIRST, THEN set stream_loop on it.
-    // In fluent-ffmpeg, inputOptions() targets the most recently added input.
-    // Old code applied -stream_loop to input 0 (video) by mistake.
     if (hasExternalAudio && (audioMode === 'replace' || audioMode === 'mix')) {
       cmd.input(options.audioPath);
+      currentInputIndex++;
+      externalAudioIndex = currentInputIndex;
       if (audioMode === 'mix') {
-        // Now correctly targets input 1 (the audio file just added above)
         cmd.inputOptions('-stream_loop', '-1');
       }
+    }
+
+    if (hasSplitOverlay) {
+      cmd.input(options.splitOverlayVideoPath);
+      currentInputIndex++;
+      splitOverlayVideoIndex = currentInputIndex;
+      cmd.inputOptions('-stream_loop', '-1');
     }
 
     if (trimEnd !== null && trimEnd !== '' && !isNaN(parseFloat(trimEnd))) {
@@ -882,17 +1057,35 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
         const mainChain = (needsVideoEncode && vfParts.length > 0) ? vfParts.join(',') : 'null';
         fcParts.push(`[0:v]${mainChain}[_splitprocessed]`);
 
+        if (hasSplitOverlay) {
+          if (splitDirection === 'horizontal') {
+            fcParts.push(`[${splitOverlayVideoIndex}:v]scale=trunc(iw/4)*2:trunc(ih/2)*2[_overlayvid]`);
+          } else {
+            fcParts.push(`[${splitOverlayVideoIndex}:v]scale=trunc(iw/2)*2:trunc(ih/4)*2[_overlayvid]`);
+          }
+        }
+
         if (splitDirection === 'horizontal') {
           // Side-by-side: each half = half width, full height
           fcParts.push('[_splitprocessed]split=2[_splitleft][_splitright]');
           fcParts.push('[_splitleft]scale=trunc(iw/4)*2:trunc(ih/2)*2[_leftvid]');
-          fcParts.push('[_splitright]scale=trunc(iw/4)*2:trunc(ih/2)*2,boxblur=25:5[_rightvid]');
+          if (hasSplitOverlay) {
+             fcParts.push('[_splitright]scale=trunc(iw/4)*2:trunc(ih/2)*2,boxblur=25:5[_blurright]');
+             fcParts.push('[_blurright][_overlayvid]overlay=0:0[_rightvid]');
+          } else {
+             fcParts.push('[_splitright]scale=trunc(iw/4)*2:trunc(ih/2)*2,boxblur=25:5[_rightvid]');
+          }
           fcParts.push('[_leftvid][_rightvid]hstack[vout]');
         } else {
           // Top/Bottom (default): each half = full width, half height
           fcParts.push('[_splitprocessed]split=2[_splittop][_splitbot]');
           fcParts.push('[_splittop]scale=trunc(iw/2)*2:trunc(ih/4)*2[_topvid]');
-          fcParts.push('[_splitbot]scale=trunc(iw/2)*2:trunc(ih/4)*2,boxblur=25:5[_botvid]');
+          if (hasSplitOverlay) {
+             fcParts.push('[_splitbot]scale=trunc(iw/2)*2:trunc(ih/4)*2,boxblur=25:5[_blurbot]');
+             fcParts.push('[_blurbot][_overlayvid]overlay=0:0[_botvid]');
+          } else {
+             fcParts.push('[_splitbot]scale=trunc(iw/2)*2:trunc(ih/4)*2,boxblur=25:5[_botvid]');
+          }
           fcParts.push('[_topvid][_botvid]vstack[vout]');
         }
       } else if (hasOriginalVideo) {
@@ -901,10 +1094,7 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
         fcParts.push(`[0:v]${mainChain}[vout]`);
       }
 
-      // ── Audio section ────────────────────────────────────────────
-      // Audio input 1 was already added by the early block above (lines ~688-694).
-      // We reference [1:a] here without calling cmd.input() again, fixing the old
-      // double-input bug where audio was added twice for mix mode.
+      // Audio input was conditionally added above. We reference [externalAudioIndex:a]
       if (useAudioComplexFilter) {
         const vol1 = (1.0 - parseFloat(audioVolume)).toFixed(2);
         const vol2 = parseFloat(audioVolume).toFixed(2);
@@ -913,13 +1103,13 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
             ? `[0:a]volume=${vol1},${afParts.join(',')}[_a1]`
             : `[0:a]volume=${vol1}[_a1]`
         );
-        fcParts.push(`[1:a]volume=${vol2}[_a2]`);
+        fcParts.push(`[${externalAudioIndex}:a]volume=${vol2}[_a2]`);
         fcParts.push('[_a1][_a2]amix=inputs=2:duration=first:dropout_transition=3[aout]');
       } else if (afParts.length > 0 && hasOriginalAudio && audioMode !== 'mute') {
         // Audio filters exist but no amix — embed in filter_complex to avoid -af conflict
         fcParts.push(`[0:a]${afParts.join(',')}[aout]`);
       } else if (afParts.length > 0 && audioMode === 'replace' && hasExternalAudio) {
-        fcParts.push(`[1:a]${afParts.join(',')}[aout]`);
+        fcParts.push(`[${externalAudioIndex}:a]${afParts.join(',')}[aout]`);
       } else if (hasNoiseFloor && hasOriginalAudio) {
         // Feature 11: Noise floor only (no other af filters).
         // Inject white noise at extreme low volume and mix with original audio.
@@ -958,7 +1148,7 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
       } else if (audioMode === 'mute') {
         // no audio mapping
       } else if (audioMode === 'replace' && hasExternalAudio) {
-        cmd.outputOptions('-map', '1:a?');
+        cmd.outputOptions('-map', `${externalAudioIndex}:a?`);
       } else if (hasOriginalAudio) {
         cmd.outputOptions('-map', '0:a?');
       }
@@ -973,11 +1163,11 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
         cmd.noAudio();
       } else if (audioMode === 'replace' && hasExternalAudio) {
         cmd.input(options.audioPath);
-        cmd.outputOptions('-map', '0:v?', '-map', '1:a?');
+        cmd.outputOptions('-map', '0:v?', '-map', `${externalAudioIndex}:a?`);
         if (afParts.length > 0) cmd.audioFilter(afParts.join(','));
       } else if (audioMode === 'mix' && hasExternalAudio && !hasOriginalAudio) {
         cmd.input(options.audioPath);
-        cmd.outputOptions('-map', '0:v?', '-map', '1:a?');
+        cmd.outputOptions('-map', '0:v?', '-map', `${externalAudioIndex}:a?`);
         if (afParts.length > 0) cmd.audioFilter(afParts.join(','));
       } else {
         if (afParts.length > 0 && hasOriginalAudio) cmd.audioFilter(afParts.join(','));
