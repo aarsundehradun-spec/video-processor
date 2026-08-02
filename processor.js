@@ -1036,6 +1036,7 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
 
     // Map streams based on audio mode
     cmd.outputOptions('-map_metadata', '-1');
+    cmd.outputOptions('-shortest'); // Prevent infinite encoding when using stream_loop
 
     // ── Stream mapping + filter application ─────────────────────────────────────
     // We need complexFilter in two situations:
