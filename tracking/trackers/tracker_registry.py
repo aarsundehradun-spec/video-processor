@@ -1,4 +1,7 @@
-from typing import Dict, Type, Any
+from typing import Dict, Type, Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .base_tracker import BaseTracker
 
 class TrackerRegistry:
     _trackers: Dict[str, Type['BaseTracker']] = {}
@@ -12,9 +15,17 @@ class TrackerRegistry:
 
     @classmethod
     def get_tracker(cls, name: str) -> Type['BaseTracker']:
-        if name not in cls._trackers:
-            raise ValueError(f"Tracker '{name}' is not registered.")
-        return cls._trackers[name]
+        # Map frontend profiles to specific trackers
+        name_map = {
+            "BALANCED": "CSRT",
+            "FAST": "KCF",
+            "ACCURATE": "CSRT"
+        }
+        mapped_name = name_map.get(name.upper(), name.upper())
+        
+        if mapped_name not in cls._trackers:
+            raise ValueError(f"Tracker '{name}' (mapped to '{mapped_name}') is not registered.")
+        return cls._trackers[mapped_name]
 
     @classmethod
     def get_capabilities(cls, name: str) -> Dict[str, Any]:

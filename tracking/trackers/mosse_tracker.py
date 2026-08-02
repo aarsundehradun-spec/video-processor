@@ -6,15 +6,8 @@ from .tracker_registry import TrackerRegistry
 @TrackerRegistry.register("MOSSE")
 class MOSSETracker(BaseTracker):
     def __init__(self):
-        # cv2.TrackerMOSSE_create() is in opencv-contrib-python or older versions
-        # We use a fallback if not available, or assume it's available.
-        if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerMOSSE_create'):
-            self.tracker = cv2.legacy.TrackerMOSSE_create()
-        elif hasattr(cv2, 'TrackerMOSSE_create'):
-            self.tracker = cv2.TrackerMOSSE_create()
-        else:
-            # Fallback to CSRT if MOSSE is entirely unavailable in this cv2 build
-            self.tracker = cv2.TrackerCSRT_create()
+        # Fallback to MIL tracker since MOSSE was removed in modern OpenCV versions
+        self.tracker = cv2.TrackerMIL_create()
         
     @classmethod
     def capabilities(cls) -> Dict[str, Any]:

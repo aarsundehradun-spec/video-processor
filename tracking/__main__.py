@@ -18,7 +18,7 @@ def main():
         context.save_checkpoint("initial")
     except Exception as e:
         context.set_status("tracking", "failed")
-        context.logger.info(f"Validation failed: {str(e)}")
+        context.logger.exception("Validation failed")
         context.save()
         sys.exit(1)
         
@@ -29,7 +29,7 @@ def main():
         context.save_checkpoint("tracking")
     except Exception as e:
         context.set_status("tracking", "failed")
-        context.logger.info(f"Tracking failed: {str(e)}")
+        context.logger.exception("Tracking failed")
         context.save()
         sys.exit(1)
         
@@ -41,7 +41,7 @@ def main():
             context.save_checkpoint("completed")
         except Exception as e:
             context.set_status("rendering", "failed")
-            context.logger.info(f"Rendering failed: {str(e)}")
+            context.logger.exception("Rendering failed")
             context.save()
             sys.exit(1)
             

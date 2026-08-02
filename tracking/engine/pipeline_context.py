@@ -12,6 +12,21 @@ class PipelineLogger:
     def info(self, msg: str):
         logging.info(msg)
         
+    def error(self, msg: str):
+        print(f"[ERROR] {msg}")
+        self._add_event("Error", {"message": msg})
+        
+    def exception(self, msg: str):
+        import traceback
+        err_msg = f"{msg}: {traceback.format_exc()}"
+        print(f"[ERROR] {err_msg}")
+        self._add_event("Error", {"message": err_msg})
+        
+    def _add_event(self, event_type: str, details: dict):
+        import time
+        evt = {"time": time.time(), "type": event_type, **details}
+        self.context.manifest.runtime.events.append(evt)
+
     def event(self, event_type: str, time: float, details: dict = None):
         if details is None:
             details = {}

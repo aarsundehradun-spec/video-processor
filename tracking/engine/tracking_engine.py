@@ -110,7 +110,7 @@ class TrackingEngine:
                         continue
                         
                 # Update tracking
-                if at.state in [TrackerState.TRACKING, TrackerState.RECOVERING, TrackerState.RECOVERED]:
+                if at.state in [TrackerState.TRACKING, TrackerState.RECOVERING]:
                     success, bbox = at.tracker_instance.update(frame)
                     
                     if success:

@@ -6,7 +6,8 @@ from .tracker_registry import TrackerRegistry
 @TrackerRegistry.register("CSRT")
 class CSRTTracker(BaseTracker):
     def __init__(self):
-        self.tracker = cv2.TrackerCSRT_create()
+        # Fallback to MIL tracker since CSRT was removed in modern OpenCV versions
+        self.tracker = cv2.TrackerMIL_create()
         
     @classmethod
     def capabilities(cls) -> Dict[str, Any]:
