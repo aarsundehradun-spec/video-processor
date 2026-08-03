@@ -111,9 +111,14 @@ class TrackingEngine:
                     px, py, pw, ph = self._percent_to_pixel(at.bbox_percent, width, height)
                     # Scale initial bbox
                     s_bbox = (int(px * scale), int(py * scale), int(pw * scale), int(ph * scale))
-                    at.tracker_instance.init(track_frame, s_bbox)
-                    at.state = TrackerState.TRACKING
-                    self.context.logger.event("TrackerStarted", current_time, {"target_id": target_id, "bbox": s_bbox})
+                    success = at.tracker_instance.initialize(track_frame, s_bbox)
+                    if success:
+                        at.state = TrackerState.TRACKING
+                        self.context.logger.event("TrackerStarted", current_time, {"target_id": target_id, "bbox": s_bbox})
+                    else:
+                        at.state = TrackerState.FAILED
+                        self.context.logger.event("TrackerFailed", current_time, {"target_id": target_id})
+                        continue
                     
                 # Update tracking
                 if at.state in [TrackerState.TRACKING, TrackerState.RECOVERING]:
