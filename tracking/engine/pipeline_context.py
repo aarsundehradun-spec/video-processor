@@ -70,6 +70,9 @@ class PipelineContext:
                 
     def update_progress(self, stage: str, percent: int):
         self.manifest.runtime.progress[stage] = percent
+        import sys
+        print(json.dumps({"type": "progress", "stage": stage, "percent": percent}))
+        sys.stdout.flush()
         
     def set_status(self, stage: str, status: str):
         self.manifest.runtime.status[stage] = status
