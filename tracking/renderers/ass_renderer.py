@@ -90,11 +90,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                             if layer.type == 'circle':
                                 # Ascent for Arial Fontsize 50 is approximately 45 pixels.
                                 # Using \an7 places the top of the bounding box at (cx, cy).
-                                # The vector origin (0,0) is placed at the baseline (cy + 45).
-                                # To center the drawing at (cx, cy), we offset the drawing coordinates by -45.
                                 radius = int(max(w, h) / 2)
-                                dy = -45 # Compensate for baseline
-                                text = f"{{\\an7\\pos({cx},{cy})\\1a&HFF&\\3a&H00&\\3c{ass_color}\\p1}}m 0 {-radius+dy} b {radius} {-radius+dy} {radius} {radius+dy} 0 {radius+dy} b {-radius} {radius+dy} {-radius} {-radius+dy} 0 {-radius+dy}{{\\p0}}"
+                                text = f"{{\\pos({cx},{cy + radius})\\1a&HFF&\\3a&H00&\\3c{ass_color}\\p1}}m 0 {-radius} b {radius} {-radius} {radius} {radius} 0 {radius} b {-radius} {radius} {-radius} {-radius} 0 {-radius}{{\\p0}}"
                                 f_out.write(f"Dialogue: 0,{start_str},{end_str},CircleStyle,,0,0,0,,{text}\n")
                             elif layer.type == 'arrow':
                                 # Arrow points down at the top of the bounding box.
