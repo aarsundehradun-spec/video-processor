@@ -134,17 +134,7 @@ router.post('/upload', upload, async (req, res) => {
     splitDirection:     (req.body.splitDirection || 'vertical').trim(),
     splitOverlayVideoPath: splitOverlayVideoFile ? splitOverlayVideoFile.path : null,
 
-    // ── Tracker Feature ────────────────────────────────────────────────────
-    trackerEnabled:   req.body.trackerEnabled === 'true',
-    trackerShape:     (req.body.trackerShape || 'circle').trim(),
-    trackerStartX:    parseFloat(req.body.trackerStartX || '0'),
-    trackerStartY:    parseFloat(req.body.trackerStartY || '0'),
-    trackerEndX:      parseFloat(req.body.trackerEndX || '0'),
-    trackerEndY:      parseFloat(req.body.trackerEndY || '0'),
-    trackerStartTime: parseFloat(req.body.trackerStartTime || '0'),
-    trackerEndTime:   parseFloat(req.body.trackerEndTime || '10'),
-    trackerSize:      parseInt(req.body.trackerSize || '50', 10),
-    trackerColor:     (req.body.trackerColor || 'red').trim(),
+
 
     // AI Tracker Feature
     aiTrackerEnabled: req.body.aiTrackerEnabled === 'true',

@@ -535,17 +535,7 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
       // ── New Feature 17: Container Re-Mux ───────────────────────────────────
       remuxEnabled = false,
       remuxFormat  = 'mkv',
-      // ── Tracker Feature ────────────────────────────────────────────────────
-      trackerEnabled = false,
-      trackerShape = 'circle',
-      trackerStartX = 0,
-      trackerStartY = 0,
-      trackerEndX = 0,
-      trackerEndY = 0,
-      trackerStartTime = 0,
-      trackerEndTime = 10,
-      trackerSize = 50,
-      trackerColor = 'red',
+
       splitOverlayVideoPath = null,
     } = options || {};
 
@@ -606,7 +596,7 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
     const hasAudioEq      = (audioEqEnabled === true || audioEqEnabled === 'true')
                               && hasOriginalAudio;
     const needsThumbRandom = thumbRandomEnabled === true || thumbRandomEnabled === 'true';
-    const needsTracker = trackerEnabled === true || trackerEnabled === 'true';
+
     const hasSplitOverlay = needsSplitScreen && options && options.splitOverlayVideoPath && fs.existsSync(options.splitOverlayVideoPath);
     const hasAiTracker = aiTrackerAssPaths.length > 0;
 
@@ -614,7 +604,7 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
       needsCrop || needsWatermark || needsSpeedChange || needsCaption ||
       autoSubtitles || colorChanged || needsMirror || needsBorder ||
       needsGrain || needsZoom || needsFaceBlur || needsSplitScreen ||
-      needsHue || needsTilt || needsVCrop || needsFrameJitter || needsSpeedRamp || needsTracker || hasAiTracker
+      needsHue || needsTilt || needsVCrop || needsFrameJitter || needsSpeedRamp || hasAiTracker
     );
 
     // ── Determine Pipeline ──────────────────────────────────────────────────
@@ -855,37 +845,7 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
         vfParts.push(`setpts=${ptsExpr}`);
       }
 
-      // 3.5 Tracker Animation
-      if (needsTracker) {
-         const sT = parseFloat(trackerStartTime) || 0;
-         let eT = parseFloat(trackerEndTime) || 10;
-         if (eT <= sT) eT = sT + 1; // avoid division by zero
-         
-         const sX = parseFloat(trackerStartX) || 0;
-         const sY = parseFloat(trackerStartY) || 0;
-         const eX = parseFloat(trackerEndX) || 0;
-         const eY = parseFloat(trackerEndY) || 0;
-         
-         const xExpr = `if(lt(t\\,${sT})\\,${sX}\\,if(gt(t\\,${eT})\\,${eX}\\,${sX}+(${eX}-${sX})*(t-${sT})/(${eT}-${sT})))`;
-         const yExpr = `if(lt(t\\,${sT})\\,${sY}\\,if(gt(t\\,${eT})\\,${eY}\\,${sY}+(${eY}-${sY})*(t-${sT})/(${eT}-${sT})))`;
-         
-         const shape = trackerShape === 'arrow' ? '➔' : '⭕';
-         const size = parseInt(trackerSize, 10) || 50;
-         const ALLOWED_COLORS = new Set(['red', 'green', 'blue', 'yellow', 'white', 'black', 'magenta', 'cyan']);
-         const safeColor = ALLOWED_COLORS.has(trackerColor) ? trackerColor : 'red';
-         
-         const crypto = require('crypto');
-         const outputsDir = path.join(__dirname, 'disk_tmp', 'meta-remover-outputs');
-         const trackerFile = path.join(outputsDir, `tracker-${crypto.randomUUID()}.txt`);
-         fs.writeFileSync(trackerFile, shape, 'utf8');
-         
-         const localFont = path.join(__dirname, 'bin', 'Roboto-Bold.ttf');
-         const fontPath = process.platform === 'darwin'
-          ? '/System/Library/Fonts/Helvetica.ttc'
-          : (fs.existsSync(localFont) ? localFont : '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf');
 
-         vfParts.push(`drawtext=textfile='${trackerFile.replace(/\\/g, '/')}':fontsize=${size}:fontcolor=${safeColor}:x='${xExpr}':y='${yExpr}':fontfile='${fontPath}'`);
-      }
 
       // 4. Caption burn-in
       if (needsCaption) {
