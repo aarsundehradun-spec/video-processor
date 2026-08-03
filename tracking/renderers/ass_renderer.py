@@ -55,7 +55,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: CircleStyle,Arial,1,&H000000FF&,&H000000FF&,&H000000FF&,&H00000000&,0,0,0,0,100,100,0,0,1,5,0,5,0,0,0,1
+Style: CircleStyle,Arial,50,&H000000FF&,&H000000FF&,&H000000FF&,&H00000000&,0,0,0,0,100,100,0,0,1,5,0,5,0,0,0,1
 Style: ArrowStyle,Arial,50,&H000000FF&,&H000000FF&,&H00000000&,&H00000000&,0,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1
 
 [Events]
