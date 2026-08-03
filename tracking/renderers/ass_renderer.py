@@ -55,7 +55,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: CircleStyle,Arial,50,&H000000FF&,&H000000FF&,&H000000FF&,&H00000000&,0,0,0,0,100,100,0,0,1,5,0,5,0,0,0,1
+Style: CircleStyle,Arial,1,&H000000FF&,&H000000FF&,&H000000FF&,&H00000000&,0,0,0,0,100,100,0,0,1,5,0,5,0,0,0,1
 Style: ArrowStyle,Arial,50,&H000000FF&,&H000000FF&,&H00000000&,&H00000000&,0,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1
 
 [Events]
@@ -88,13 +88,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                             end_str = self._format_time(t_end)
                             
                             if layer.type == 'circle':
-                                # Draw circle shape (using vector drawing)
-                                radius = int(max(w, h) / 2) + int(size)
-                                text = f"{{\\pos({cx},{cy})\\1a&HFF&\\3a&H00&\\3c{ass_color}\\p1}}m 0 {-radius} b {radius} {-radius} {radius} {radius} 0 {radius} b {-radius} {radius} {-radius} {-radius} 0 {-radius}{{\\p0}}"
+                                # Draw circle shape tightly around object, centered exactly
+                                radius = int(max(w, h) / 2) + 5
+                                text = f"{{\\an7\\pos({cx - radius},{cy - radius})\\1a&HFF&\\3a&H00&\\3c{ass_color}\\p1}}m {radius} 0 b {2*radius} 0 {2*radius} {2*radius} {radius} {2*radius} b 0 {2*radius} 0 0 {radius} 0{{\\p0}}"
                                 f_out.write(f"Dialogue: 0,{start_str},{end_str},CircleStyle,,0,0,0,,{text}\n")
                             elif layer.type == 'arrow':
-                                offset = int(size) + int(max(w, h) / 2) + 20
-                                text = f"{{\\pos({cx},{cy - offset})\\1a&H00&\\1c{ass_color}}}▼"
+                                # Arrow points down from the top of the bounding box
+                                offset = int(h / 2) + 5
+                                text = f"{{\\an2\\pos({cx},{cy - offset})\\1a&H00&\\1c{ass_color}\\fs{int(size)}}}▼"
                                 f_out.write(f"Dialogue: 0,{start_str},{end_str},ArrowStyle,,0,0,0,,{text}\n")
                                 
             context.manifest.runtime.artifacts["ass"].append(f"{layer.id}.ass")
