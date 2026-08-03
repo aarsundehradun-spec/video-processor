@@ -97,23 +97,36 @@ class TrackingEngine:
                         self.context.logger.event("TrackerFinished", current_time, {"target_id": target_id})
                     continue
                     
+                # Optimization: Resize frame for faster tracking
+                scale = 1.0
+                max_width = 640
+                if width > max_width:
+                    scale = max_width / width
+                    track_frame = cv2.resize(frame, (int(width * scale), int(height * scale)))
+                else:
+                    track_frame = frame
+                
                 # Initialize tracker on first active frame
                 if at.state == TrackerState.CREATED:
-                    initial_bbox = self._percent_to_pixel(at.bbox_percent, width, height)
-                    success = at.tracker_instance.initialize(frame, initial_bbox)
-                    if success:
-                        at.state = TrackerState.TRACKING
-                        at.last_known_bbox = initial_bbox
-                    else:
-                        at.state = TrackerState.FAILED
-                        self.context.logger.event("TrackerFailed", current_time, {"target_id": target_id})
-                        continue
-                        
+                    px, py, pw, ph = self._percent_to_pixel(at.bbox_percent, width, height)
+                    # Scale initial bbox
+                    s_bbox = (int(px * scale), int(py * scale), int(pw * scale), int(ph * scale))
+                    at.tracker_instance.init(track_frame, s_bbox)
+                    at.state = TrackerState.TRACKING
+                    self.context.logger.event("TrackerStarted", current_time, {"target_id": target_id, "bbox": s_bbox})
+                    
                 # Update tracking
                 if at.state in [TrackerState.TRACKING, TrackerState.RECOVERING]:
-                    success, bbox = at.tracker_instance.update(frame)
+                    success, s_bbox_result = at.tracker_instance.update(track_frame)
                     
                     if success:
+                        # Unscale the result bbox
+                        bbox = (
+                            s_bbox_result[0] / scale,
+                            s_bbox_result[1] / scale,
+                            s_bbox_result[2] / scale,
+                            s_bbox_result[3] / scale
+                        )
                         if at.state == TrackerState.RECOVERING:
                             self.context.logger.event("TrackerRecovered", current_time, {"target_id": target_id})
                             # Reset recovery logic (simulated by resetting current_failures inside recovery_strategy in a full impl)
