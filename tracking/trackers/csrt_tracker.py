@@ -20,7 +20,11 @@ class CSRTTracker(BaseTracker):
         }
 
     def initialize(self, frame, bbox: Tuple[int, int, int, int]) -> bool:
-        return self.tracker.init(frame, bbox)
+        try:
+            self.tracker.init(frame, bbox)
+            return True
+        except Exception:
+            return False
 
     def update(self, frame) -> Tuple[bool, Optional[Tuple[int, int, int, int]]]:
         success, bbox = self.tracker.update(frame)
