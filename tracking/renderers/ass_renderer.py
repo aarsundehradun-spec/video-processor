@@ -82,20 +82,26 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                             bbox = obj['bbox']
                             x, y, w, h = bbox
                             cx = int(x + w/2)
-                            # If it was appearing 'slightly above', we push it down slightly
-                            cy = int(y + h/2) + 15
+                            cy = int(y + h/2)
                             
                             start_str = self._format_time(t_start)
                             end_str = self._format_time(t_end)
                             
                             if layer.type == 'circle':
-                                # Draw circle shape (using vector drawing)
+                                # Ascent for Arial Fontsize 50 is approximately 45 pixels.
+                                # Using \an7 places the top of the bounding box at (cx, cy).
+                                # The vector origin (0,0) is placed at the baseline (cy + 45).
+                                # To center the drawing at (cx, cy), we offset the drawing coordinates by -45.
                                 radius = int(max(w, h) / 2) + 10
-                                text = f"{{\\pos({cx},{cy})\\1a&HFF&\\3a&H00&\\3c{ass_color}\\p1}}m 0 {-radius} b {radius} {-radius} {radius} {radius} 0 {radius} b {-radius} {radius} {-radius} {-radius} 0 {-radius}{{\\p0}}"
+                                dy = -45 # Compensate for baseline
+                                text = f"{{\\an7\\pos({cx},{cy})\\1a&HFF&\\3a&H00&\\3c{ass_color}\\p1}}m 0 {-radius+dy} b {radius} {-radius+dy} {radius} {radius+dy} 0 {radius+dy} b {-radius} {radius+dy} {-radius} {-radius+dy} 0 {-radius+dy}{{\\p0}}"
                                 f_out.write(f"Dialogue: 0,{start_str},{end_str},CircleStyle,,0,0,0,,{text}\n")
                             elif layer.type == 'arrow':
-                                offset = int(h / 2) + 30
-                                text = f"{{\\pos({cx},{cy - offset})\\1a&H00&\\1c{ass_color}}}▼"
+                                # Arrow points down at the top of the bounding box.
+                                offset = int(h / 2) + 20
+                                # For text, \an2 (bottom-center) aligns the bottom of the bounding box to the given pos.
+                                # The bottom of the bounding box includes Descent (approx 10px).
+                                text = f"{{\\an2\\pos({cx},{cy - offset})\\1a&H00&\\1c{ass_color}}}▼"
                                 f_out.write(f"Dialogue: 0,{start_str},{end_str},ArrowStyle,,0,0,0,,{text}\n")
                                 
             context.manifest.runtime.artifacts["ass"].append(f"{layer.id}.ass")
