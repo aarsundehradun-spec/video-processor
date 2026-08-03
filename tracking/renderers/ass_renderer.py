@@ -82,20 +82,20 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                             bbox = obj['bbox']
                             x, y, w, h = bbox
                             cx = int(x + w/2)
-                            cy = int(y + h/2)
+                            # If it was appearing 'slightly above', we push it down slightly
+                            cy = int(y + h/2) + 15
                             
                             start_str = self._format_time(t_start)
                             end_str = self._format_time(t_end)
                             
                             if layer.type == 'circle':
-                                # Draw circle shape tightly around object, centered exactly
-                                radius = int(max(w, h) / 2) + 5
-                                text = f"{{\\an7\\pos({cx - radius},{cy - radius})\\1a&HFF&\\3a&H00&\\3c{ass_color}\\p1}}m {radius} 0 b {2*radius} 0 {2*radius} {2*radius} {radius} {2*radius} b 0 {2*radius} 0 0 {radius} 0{{\\p0}}"
+                                # Draw circle shape (using vector drawing)
+                                radius = int(max(w, h) / 2) + 10
+                                text = f"{{\\pos({cx},{cy})\\1a&HFF&\\3a&H00&\\3c{ass_color}\\p1}}m 0 {-radius} b {radius} {-radius} {radius} {radius} 0 {radius} b {-radius} {radius} {-radius} {-radius} 0 {-radius}{{\\p0}}"
                                 f_out.write(f"Dialogue: 0,{start_str},{end_str},CircleStyle,,0,0,0,,{text}\n")
                             elif layer.type == 'arrow':
-                                # Arrow points down from the top of the bounding box
-                                offset = int(h / 2) + 5
-                                text = f"{{\\an2\\pos({cx},{cy - offset})\\1a&H00&\\1c{ass_color}\\fs{int(size)}}}▼"
+                                offset = int(h / 2) + 30
+                                text = f"{{\\pos({cx},{cy - offset})\\1a&H00&\\1c{ass_color}}}▼"
                                 f_out.write(f"Dialogue: 0,{start_str},{end_str},ArrowStyle,,0,0,0,,{text}\n")
                                 
             context.manifest.runtime.artifacts["ass"].append(f"{layer.id}.ass")
