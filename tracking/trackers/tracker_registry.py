@@ -17,9 +17,9 @@ class TrackerRegistry:
     def get_tracker(cls, name: str) -> Type['BaseTracker']:
         # Map frontend profiles to specific trackers
         name_map = {
-            "BALANCED": "CSRT",
+            "BALANCED": "NANO",
             "FAST": "KCF",
-            "ACCURATE": "CSRT"
+            "ACCURATE": "NANO"
         }
         mapped_name = name_map.get(name.upper(), name.upper())
         
