@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     cmake \
     build-essential \
     python3 \
+    python3-pip \
     python3-opencv \
     fonts-liberation \
     fontconfig \
@@ -13,6 +14,9 @@ RUN apt-get update && apt-get install -y \
     wget \
     curl \
     && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --no-cache-dir onnxruntime opencv-python-headless --break-system-packages
+
 
 WORKDIR /app
 
