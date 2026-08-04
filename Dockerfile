@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --no-cache-dir onnxruntime opencv-python-headless --break-system-packages
+RUN pip3 install --no-cache-dir onnxruntime opencv-python-headless
 
 
 WORKDIR /app
