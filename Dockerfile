@@ -1,7 +1,10 @@
 FROM node:18-bullseye-slim
 
-# Install system dependencies: ffmpeg, cmake, build-essential (required for Whisper.cpp build)
-RUN apt-get update && apt-get install -y \
+# Configure apt retries to handle unstable Debian mirrors
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
+    echo 'Acquire::http::Timeout "60";' >> /etc/apt/apt.conf.d/80-retries && \
+    echo 'Acquire::ftp::Timeout "60";' >> /etc/apt/apt.conf.d/80-retries && \
+    apt-get update && apt-get install -y --fix-missing \
     ffmpeg \
     cmake \
     build-essential \
