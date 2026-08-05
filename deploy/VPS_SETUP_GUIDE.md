@@ -31,13 +31,13 @@ sudo apt install nginx certbot python3-certbot-nginx -y
 ```
 
 ## 3. Set Up the Backend
-Clone your repository or upload your files to the VPS (e.g., `/vt.matamandir.com/video-processor-backend`).
+Clone your repository or upload your files to the VPS (e.g., `/srv1881496.hstgr.cloud/video-processor-backend`).
 
 ```bash
-cd /vt.matamandir.com/video-processor-backend
+cd /srv1881496.hstgr.cloud/video-processor-backend
 
 # Ensure your .env has the correct FRONTEND_URL
-echo "FRONTEND_URL=https://vt.matamandir.com" > .env
+echo "FRONTEND_URL=https://srv1881496.hstgr.cloud" > .env
 
 # Start the application (Docker handles restart on reboot automatically)
 sudo docker-compose up -d --build
@@ -48,10 +48,10 @@ Copy the provided Nginx configuration to your server.
 
 ```bash
 # Copy the config
-sudo cp deploy/nginx.conf /etc/nginx/sites-available/vt.matamandir.com
+sudo cp deploy/nginx.conf /etc/nginx/sites-available/srv1881496.hstgr.cloud
 
 # Enable the site and remove the default
-sudo ln -s /etc/nginx/sites-available/vt.matamandir.com /etc/nginx/sites-enabled/
+sudo ln -s /etc/nginx/sites-available/srv1881496.hstgr.cloud /etc/nginx/sites-enabled/
 sudo rm /etc/nginx/sites-enabled/default
 
 # Test Nginx configuration
@@ -65,10 +65,10 @@ Now, obtain your free SSL certificate using Certbot.
 
 ```bash
 # Obtain SSL and let Certbot automatically update the Nginx config
-sudo certbot --nginx -d vt.matamandir.com
+sudo certbot --nginx -d srv1881496.hstgr.cloud
 ```
 
 ## 5. Verify Setup
-- Check that the API is running: `https://vt.matamandir.com/api`
+- Check that the API is running: `https://srv1881496.hstgr.cloud/api`
 - Test uploading a file from the frontend to ensure CORS allows the request and the `500M` upload limit is respected.
 - Background tasks (like `node-cron` cleaning up `disk_tmp`) are already running inside the Docker container automatically.
