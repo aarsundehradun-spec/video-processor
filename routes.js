@@ -247,12 +247,20 @@ router.get('/status/:id', async (req, res) => {
     const progress = job.progress || 0;
     
     let status = 'queued';
+    let position = 0;
     if (state === 'active') status = 'processing';
     if (state === 'completed') status = 'completed';
     if (state === 'failed') status = 'failed';
     
+    // Calculate position in queue if waiting
+    if (state === 'waiting' || state === 'delayed') {
+      const waitingJobs = await processingQueue.getWaiting();
+      position = waitingJobs.findIndex(j => j.id === jobId) + 1;
+    }
+    
     res.json({
       status,
+      position,
       progress,
       result: job.returnvalue ? job.returnvalue.outputPath : null,
       originalName: job.returnvalue ? job.returnvalue.originalName : null,

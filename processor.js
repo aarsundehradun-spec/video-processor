@@ -334,7 +334,7 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
       console.log(`[Processor] Whisper AI finished. SRT generated at ${generatedSrtPath}`);
     } catch (err) {
       console.error(`[Processor] Whisper error:`, err);
-      throw new Error('Auto-subtitles generation failed: ' + err.message);
+      throw new Error('Auto-subtitles generation failed. The AI model encountered an error analyzing the audio. Ensure the video contains clear audio or try another clip.');
     }
   }
 
@@ -428,7 +428,7 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
         p.on('close', code => {
             if (jobId) activeJobs.delete(`${jobId}-tracking`);
             if (code === 0) resolve();
-            else reject(new Error(`Tracking pipeline failed with code ${code}`));
+            else reject(new Error('AI Object Tracking failed. The tracking pipeline crashed while analyzing the video. Ensure the video is not corrupted and try a different frame range.'));
         });
     });
     

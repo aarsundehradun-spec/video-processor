@@ -8,6 +8,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const fs = require('fs');
+const cron = require('node-cron');
 
 const router = require('./routes');
 
@@ -24,10 +25,9 @@ process.on('unhandledRejection', (reason) => {
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Required when running behind Render + Cloudflare reverse proxy
-// Setting it to 2 specifies the exact number of hops (Cloudflare -> Render LB), 
-// which is required by express-rate-limit to prevent ERR_ERL_PERMISSIVE_TRUST_PROXY
-app.set('trust proxy', 2);
+// Required when running behind Nginx reverse proxy
+// Setting it to 1 is appropriate for a standard Nginx reverse proxy
+app.set('trust proxy', 1);
 
 // Directories are now managed via /tmp in routes.js
 
@@ -38,7 +38,8 @@ app.use(helmet({
 }));
 
 // CORS — must come before routes
-app.use(cors({ origin: '*', optionsSuccessStatus: 200 }));
+const allowedOrigin = process.env.FRONTEND_URL || 'http://localhost:5173';
+app.use(cors({ origin: allowedOrigin, optionsSuccessStatus: 200 }));
 
 // Rate Limiting (DOS protection)
 const limiter = rateLimit({
@@ -69,7 +70,7 @@ const UPLOADS_DIR = path.join(TMP_DIR, 'meta-remover-uploads');
 const OUTPUTS_DIR = path.join(TMP_DIR, 'meta-remover-outputs');
 
 function cleanupOldFiles() {
-  const MAX_AGE = 30 * 60 * 1000; // 30 minutes
+  const MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
   const now = Date.now();
   
   [UPLOADS_DIR, OUTPUTS_DIR].forEach(dir => {
@@ -82,7 +83,7 @@ function cleanupOldFiles() {
           if (err) return;
           if (now - stats.mtimeMs > MAX_AGE) {
             fs.unlink(filePath, err => {
-              if (!err) console.log(`[Cleanup] Deleted old file: ${filePath}`);
+              if (!err) console.log(`[Cleanup] Deleted old file (24h+): ${filePath}`);
             });
           }
         });
@@ -90,7 +91,8 @@ function cleanupOldFiles() {
     });
   });
 }
-setInterval(cleanupOldFiles, 15 * 60 * 1000); // Run every 15 mins
+// Run cleanup every hour at the top of the hour
+cron.schedule('0 * * * *', cleanupOldFiles);
 cleanupOldFiles(); // Run once on startup
 
 const server = app.listen(PORT, () => {
