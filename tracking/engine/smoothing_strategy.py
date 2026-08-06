@@ -7,13 +7,16 @@ class SmoothingStrategy(ABC):
         pass
 
 class EMASmoothing(SmoothingStrategy):
-    def __init__(self, alpha: float = 0.2):
+    def __init__(self, alpha: float = 0.15):
         self.alpha = alpha
+        self.last_smoothed = None
         
     def smooth(self, current_val: float, new_val: float) -> float:
-        if current_val is None:
-            return new_val
-        return (self.alpha * new_val) + ((1 - self.alpha) * current_val)
+        if self.last_smoothed is None:
+            self.last_smoothed = new_val
+        else:
+            self.last_smoothed = (self.alpha * new_val) + ((1 - self.alpha) * self.last_smoothed)
+        return self.last_smoothed
 
 class KalmanSmoothing(SmoothingStrategy):
     def smooth(self, current_val: float, new_val: float) -> float:
