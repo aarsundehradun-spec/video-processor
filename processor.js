@@ -599,13 +599,17 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
 
     const hasSplitOverlay = needsSplitScreen && options && options.splitOverlayVideoPath && fs.existsSync(options.splitOverlayVideoPath);
     const hasAiTracker = aiTrackerAssPaths.length > 0;
+    
+    const overlays = (options && options.overlaysEnabled && options.overlaysData) ? options.overlaysData : [];
+    const hasOverlays = overlays.length > 0;
 
     const needsVideoEncode = hasOriginalVideo && (
       needsCrop || needsWatermark || needsSpeedChange || needsCaption ||
       autoSubtitles || colorChanged || needsMirror || needsBorder ||
       needsGrain || needsZoom || needsFaceBlur || needsSplitScreen ||
-      needsHue || needsTilt || needsVCrop || needsFrameJitter || needsSpeedRamp || hasAiTracker
+      needsHue || needsTilt || needsVCrop || needsFrameJitter || needsSpeedRamp || hasAiTracker || hasOverlays
     );
+
 
     // ── Determine Pipeline ──────────────────────────────────────────────────
     let pipeline = 'cpu';
@@ -893,6 +897,11 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
            vfParts.push(`subtitles='${safeAssPath}'`);
         }
       }
+
+      // 7. Text & Symbol Overlays (Interactive)
+      // Removed: Text/Symbol overlays are now rasterized by the frontend into transparent PNGs 
+      // and uploaded as image overlays. This completely avoids FFmpeg drawtext font configuration
+      // issues and guarantees 100% accurate WYSIWYG placement and styling.
     } // end if (needsVideoEncode)
 
     // ── Explicit VAAPI Filter Graph ─────────────────────────────────────────
@@ -988,6 +997,13 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
       cmd.inputOptions('-stream_loop', '-1');
     }
 
+    const imageOverlays = hasOverlays ? overlays.filter(o => o.type === 'image' && o.filePath && fs.existsSync(o.filePath)) : [];
+    imageOverlays.forEach(overlay => {
+      cmd.input(overlay.filePath);
+      currentInputIndex++;
+      overlay.inputIndex = currentInputIndex;
+    });
+
     if (trimEnd !== null && trimEnd !== '' && !isNaN(parseFloat(trimEnd))) {
       const start = (trimStart !== null && !isNaN(parseFloat(trimStart))) ? parseFloat(trimStart) : 0;
       const duration = parseFloat(trimEnd) - start;
@@ -1004,8 +1020,9 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
     //   B) Audio mix mode with original audio — needs filter_complex for amix
     // Both cases are unified into a SINGLE complexFilter string to avoid double-input bugs.
     const useAudioComplexFilter = (audioMode === 'mix' && hasExternalAudio && hasOriginalAudio);
+    const hasImageOverlays = imageOverlays.length > 0;
     // Also use complex filter if noise floor injection is needed — aevalsrc requires filter_complex
-    const useComplexFilter = needsSplitScreen || useAudioComplexFilter || hasNoiseFloor;
+    const useComplexFilter = needsSplitScreen || useAudioComplexFilter || hasNoiseFloor || hasImageOverlays;
 
     if (useComplexFilter) {
       // Build filter_complex string in parts
@@ -1036,7 +1053,7 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
           } else {
              fcParts.push('[_splitright]scale=trunc(iw/4)*2:trunc(ih/2)*2,boxblur=25:5[_rightvid]');
           }
-          fcParts.push('[_leftvid][_rightvid]hstack[vout]');
+          fcParts.push(`[_leftvid][_rightvid]hstack[${hasImageOverlays ? '_basevid' : 'vout'}]`);
         } else {
           // Top/Bottom (default): each half = full width, half height
           fcParts.push('[_splitprocessed]split=2[_splittop][_splitbot]');
@@ -1047,12 +1064,34 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
           } else {
              fcParts.push('[_splitbot]scale=trunc(iw/2)*2:trunc(ih/4)*2,boxblur=25:5[_botvid]');
           }
-          fcParts.push('[_topvid][_botvid]vstack[vout]');
+          fcParts.push(`[_topvid][_botvid]vstack[${hasImageOverlays ? '_basevid' : 'vout'}]`);
+        }
+
+        if (hasImageOverlays) {
+          let lastVidOut = '_basevid';
+          imageOverlays.forEach((ov, idx) => {
+            const outName = idx === imageOverlays.length - 1 ? 'vout' : `_ov${idx}`;
+            fcParts.push(`[${ov.inputIndex}:v][${lastVidOut}]scale2ref=w=iw*${(ov.widthPct || 10)/100}:h=ih*${(ov.heightPct || 10)/100}[_scaled_ov${idx}][_ref_ov${idx}]`);
+            fcParts.push(`[_ref_ov${idx}][_scaled_ov${idx}]overlay=x=W*${(ov.xPct || 0)/100}:y=H*${(ov.yPct || 0)/100}[${outName}]`);
+            lastVidOut = outName;
+          });
         }
       } else if (hasOriginalVideo) {
         // No split-screen — passthrough video with existing vf chain
-        const mainChain = (needsVideoEncode && vfParts.length > 0) ? vfParts.join(',') : 'null';
-        fcParts.push(`[0:v]${mainChain}[vout]`);
+        let mainChain = (needsVideoEncode && vfParts.length > 0) ? vfParts.join(',') : 'null';
+        
+        if (hasImageOverlays) {
+          fcParts.push(`[0:v]${mainChain}[_basevid]`);
+          let lastVidOut = '_basevid';
+          imageOverlays.forEach((ov, idx) => {
+            const outName = idx === imageOverlays.length - 1 ? 'vout' : `_ov${idx}`;
+            fcParts.push(`[${ov.inputIndex}:v][${lastVidOut}]scale2ref=w=iw*${(ov.widthPct || 10)/100}:h=ih*${(ov.heightPct || 10)/100}[_scaled_ov${idx}][_ref_ov${idx}]`);
+            fcParts.push(`[_ref_ov${idx}][_scaled_ov${idx}]overlay=x=W*${(ov.xPct || 0)/100}:y=H*${(ov.yPct || 0)/100}[${outName}]`);
+            lastVidOut = outName;
+          });
+        } else {
+          fcParts.push(`[0:v]${mainChain}[vout]`);
+        }
       }
 
       // Audio input was conditionally added above. We reference [externalAudioIndex:a]

@@ -33,19 +33,21 @@ const storage = multer.diskStorage({
   }
 });
 
-// Accept both 'file' (video) and 'audio' (optional voiceover/background)
+// Accept any file field for dynamic overlays
 const upload = multer({
   storage,
   limits: { fileSize: 500 * 1024 * 1024 } // 500MB limit (free tier safe)
-}).fields([
-  { name: 'file', maxCount: 1 },
-  { name: 'audio', maxCount: 1 },
-  { name: 'splitOverlayVideo', maxCount: 1 },
-]);
+}).any();
 
 // Upload endpoint
 router.post('/upload', upload, async (req, res) => {
-  const files = req.files || {};
+  const filesArray = req.files || [];
+  const files = {};
+  filesArray.forEach(f => {
+    if (!files[f.fieldname]) files[f.fieldname] = [];
+    files[f.fieldname].push(f);
+  });
+
   if (!files.file || files.file.length === 0) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
@@ -207,6 +209,24 @@ router.post('/upload', upload, async (req, res) => {
     // ── New Feature 17: Container Re-Mux ──────────────────────────────────
     remuxEnabled:     req.body.remuxEnabled === 'true',
     remuxFormat:      (req.body.remuxFormat || 'mkv').trim(),
+
+    // ── Interactive Overlays ──────────────────────────────────────────────
+    overlaysEnabled: req.body.overlaysEnabled === 'true',
+    overlaysData: (() => {
+      if (req.body.overlaysEnabled === 'true' && req.body.overlaysData) {
+        try { 
+           const parsed = JSON.parse(req.body.overlaysData); 
+           // Attach file paths for images
+           return parsed.map(o => {
+              if (o.type === 'image' && files[`overlayImage_${o.id}`]) {
+                 o.filePath = files[`overlayImage_${o.id}`][0].path;
+              }
+              return o;
+           });
+        } catch (e) { console.error("Failed to parse overlaysData:", e); }
+      }
+      return [];
+    })(),
   };
 
   // Output name: respect remux format if enabled, otherwise always .mp4 for transform
