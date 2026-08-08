@@ -227,6 +227,19 @@ router.post('/upload', upload, async (req, res) => {
       }
       return [];
     })(),
+
+    // ── Feature 20: Magnifying Glass ──────────────────────────────────────
+    magnifyEnabled: req.body.magnifyEnabled === 'true',
+    magnifyCrop: req.body.magnifyCropX !== undefined ? {
+      x: parseInt(req.body.magnifyCropX),
+      y: parseInt(req.body.magnifyCropY),
+      w: parseInt(req.body.magnifyCropW),
+      h: parseInt(req.body.magnifyCropH)
+    } : null,
+    magnifyZoom: parseFloat(req.body.magnifyZoom) || 2.0,
+    magnifyBlur: parseInt(req.body.magnifyBlur) || 20,
+    magnifyStart: parseFloat(req.body.magnifyStart) || 0,
+    magnifyEnd: parseFloat(req.body.magnifyEnd) || null,
   };
 
   // Output name: respect remux format if enabled, otherwise always .mp4 for transform

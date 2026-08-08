@@ -269,6 +269,7 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
   let hasOriginalVideo = true;
   let hasOriginalAudio = true;
   let videoWidth = 0;
+  let videoHeight = 0;
   let videoDuration = 10;
   try {
     const probe = cachedProbe || (await ffprobeAsync(inputPath));
@@ -276,7 +277,7 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
       hasOriginalVideo = probe.streams.some(s => s.codec_type === 'video');
       hasOriginalAudio = probe.streams.some(s => s.codec_type === 'audio');
       const vStream = probe.streams.find(s => s.codec_type === 'video');
-      if (vStream) videoWidth = vStream.width || 0;
+      if (vStream) { videoWidth = vStream.width || 0; videoHeight = vStream.height || 0; }
       if (probe.format && probe.format.duration) {
         videoDuration = parseFloat(probe.format.duration);
       }
@@ -536,6 +537,10 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
       remuxEnabled = false,
       remuxFormat  = 'mkv',
 
+      // ── Feature 20: Magnifying Glass ───────────────────────────────────────
+      magnifyEnabled = false,
+      magnifyZones: magnifyZonesRaw = [],
+
       splitOverlayVideoPath = null,
     } = options || {};
 
@@ -599,6 +604,18 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
 
     const hasSplitOverlay = needsSplitScreen && options && options.splitOverlayVideoPath && fs.existsSync(options.splitOverlayVideoPath);
     const hasAiTracker = aiTrackerAssPaths.length > 0;
+
+    // ── Feature 20: Magnifying Glass — parse zones ─────────────────────────
+    const parsedMagnifyZones = (() => {
+      try {
+        const raw = Array.isArray(magnifyZonesRaw) ? magnifyZonesRaw
+          : (typeof magnifyZonesRaw === 'string' ? JSON.parse(magnifyZonesRaw) : []);
+        return raw.filter(z => z && parseFloat(z.wPct) > 0 && parseFloat(z.hPct) > 0
+          && parseFloat(z.endTime) > parseFloat(z.startTime));
+      } catch { return []; }
+    })();
+    const needsMagnify = (magnifyEnabled === true || magnifyEnabled === 'true')
+      && parsedMagnifyZones.length > 0;
     
     const overlays = (options && options.overlaysEnabled && options.overlaysData) ? options.overlaysData : [];
     const hasOverlays = overlays.length > 0;
@@ -607,7 +624,8 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
       needsCrop || needsWatermark || needsSpeedChange || needsCaption ||
       autoSubtitles || colorChanged || needsMirror || needsBorder ||
       needsGrain || needsZoom || needsFaceBlur || needsSplitScreen ||
-      needsHue || needsTilt || needsVCrop || needsFrameJitter || needsSpeedRamp || hasAiTracker || hasOverlays
+      needsHue || needsTilt || needsVCrop || needsFrameJitter || needsSpeedRamp || hasAiTracker || hasOverlays ||
+      needsMagnify
     );
 
 
@@ -851,16 +869,43 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
 
 
 
-      // 4. Caption burn-in
       if (needsCaption) {
         // Write caption to a text file to bypass FFmpeg's fragile filtergraph escaping rules.
         // This completely prevents "Filter not found" crashes when text contains quotes, commas, colons, etc.
         const crypto = require('crypto');
         const outputsDir = path.join(__dirname, 'disk_tmp', 'meta-remover-outputs');
         captionFile = path.join(outputsDir, `caption-${crypto.randomUUID()}.txt`);
-        fs.writeFileSync(captionFile, captionText.trim(), 'utf8');
-
+        
         const fontsize = parseInt(captionSize, 10) || 36;
+        
+        // Auto word-wrap to prevent text going off-screen
+        const wrapText = (text, maxChars) => {
+          return text.split('\n').map(line => {
+            const words = line.split(' ');
+            let result = '';
+            let currentLine = '';
+            for (const word of words) {
+              if (currentLine.length + word.length > maxChars) {
+                if (currentLine.trim() !== '') {
+                  result += currentLine.trim() + '\n';
+                }
+                currentLine = word + ' ';
+              } else {
+                currentLine += word + ' ';
+              }
+            }
+            result += currentLine.trim();
+            return result;
+          }).join('\n');
+        };
+        
+        const effectiveWidth = (videoWidth > 0 ? videoWidth : 1280) * 0.9; // 90% of screen width
+        const charWidth = fontsize * 0.6; // Approximate average char width
+        const maxCharsPerLine = Math.max(15, Math.floor(effectiveWidth / charWidth));
+        
+        const wrappedCaption = wrapText(captionText.trim(), maxCharsPerLine);
+        fs.writeFileSync(captionFile, wrappedCaption, 'utf8');
+
         const ALLOWED_COLORS = new Set(['white', 'yellow', 'black', 'red', 'cyan']);
         const safeColor = ALLOWED_COLORS.has(captionColor) ? captionColor : 'white';
         const localFont = path.join(__dirname, 'bin', 'Roboto-Bold.ttf');
@@ -874,7 +919,7 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
         else                                   yExpr = 'h-text_h-30'; // bottom (default)
 
         vfParts.push(
-          `drawtext=textfile='${captionFile.replace(/\\/g, '/')}':fontsize=${fontsize}:fontcolor=${safeColor}:x=(w-text_w)/2:y=${yExpr}:box=1:boxcolor=black@0.5:boxborderw=8:fontfile='${fontPath}'`
+          `drawtext=textfile='${captionFile.replace(/\\/g, '/')}':fontsize=${fontsize}:fontcolor=${safeColor}:x=(w-text_w)/2:y=${yExpr}:box=1:boxcolor=black@0.5:boxborderw=8:line_spacing=5:fontfile='${fontPath}'`
         );
       }
       // 5. Auto Subtitles via Whisper SRT
@@ -1022,11 +1067,14 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
     const useAudioComplexFilter = (audioMode === 'mix' && hasExternalAudio && hasOriginalAudio);
     const hasImageOverlays = imageOverlays.length > 0;
     // Also use complex filter if noise floor injection is needed — aevalsrc requires filter_complex
-    const useComplexFilter = needsSplitScreen || useAudioComplexFilter || hasNoiseFloor || hasImageOverlays;
+    const useComplexFilter = needsSplitScreen || useAudioComplexFilter || hasNoiseFloor || hasImageOverlays || needsMagnify;
 
     if (useComplexFilter) {
       // Build filter_complex string in parts
       // ── Video section ────────────────────────────────────────────
+      // Pre-compute final label: if magnify zones are chained, intermediate output is '_pre_magnify'
+      const preMagnifyLabel = (needsMagnify && hasOriginalVideo) ? '_pre_magnify' : 'vout';
+
       const fcParts = []; // each element is a complete filter chain segment (no trailing ;)
 
       if (needsSplitScreen && hasOriginalVideo) {
@@ -1053,7 +1101,7 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
           } else {
              fcParts.push('[_splitright]scale=trunc(iw/4)*2:trunc(ih/2)*2,boxblur=25:5[_rightvid]');
           }
-          fcParts.push(`[_leftvid][_rightvid]hstack[${hasImageOverlays ? '_basevid' : 'vout'}]`);
+          fcParts.push(`[_leftvid][_rightvid]hstack[${hasImageOverlays ? '_basevid' : preMagnifyLabel}]`);
         } else {
           // Top/Bottom (default): each half = full width, half height
           fcParts.push('[_splitprocessed]split=2[_splittop][_splitbot]');
@@ -1064,13 +1112,13 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
           } else {
              fcParts.push('[_splitbot]scale=trunc(iw/2)*2:trunc(ih/4)*2,boxblur=25:5[_botvid]');
           }
-          fcParts.push(`[_topvid][_botvid]vstack[${hasImageOverlays ? '_basevid' : 'vout'}]`);
+          fcParts.push(`[_topvid][_botvid]vstack[${hasImageOverlays ? '_basevid' : preMagnifyLabel}]`);
         }
 
         if (hasImageOverlays) {
           let lastVidOut = '_basevid';
           imageOverlays.forEach((ov, idx) => {
-            const outName = idx === imageOverlays.length - 1 ? 'vout' : `_ov${idx}`;
+            const outName = idx === imageOverlays.length - 1 ? (needsMagnify ? '_pre_magnify' : 'vout') : `_ov${idx}`;
             fcParts.push(`[${ov.inputIndex}:v][${lastVidOut}]scale2ref=w=iw*${(ov.widthPct || 10)/100}:h=ih*${(ov.heightPct || 10)/100}[_scaled_ov${idx}][_ref_ov${idx}]`);
             fcParts.push(`[_ref_ov${idx}][_scaled_ov${idx}]overlay=x=W*${(ov.xPct || 0)/100}:y=H*${(ov.yPct || 0)/100}[${outName}]`);
             lastVidOut = outName;
@@ -1084,13 +1132,13 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
           fcParts.push(`[0:v]${mainChain}[_basevid]`);
           let lastVidOut = '_basevid';
           imageOverlays.forEach((ov, idx) => {
-            const outName = idx === imageOverlays.length - 1 ? 'vout' : `_ov${idx}`;
+            const outName = idx === imageOverlays.length - 1 ? (needsMagnify ? '_pre_magnify' : 'vout') : `_ov${idx}`;
             fcParts.push(`[${ov.inputIndex}:v][${lastVidOut}]scale2ref=w=iw*${(ov.widthPct || 10)/100}:h=ih*${(ov.heightPct || 10)/100}[_scaled_ov${idx}][_ref_ov${idx}]`);
             fcParts.push(`[_ref_ov${idx}][_scaled_ov${idx}]overlay=x=W*${(ov.xPct || 0)/100}:y=H*${(ov.yPct || 0)/100}[${outName}]`);
             lastVidOut = outName;
           });
         } else {
-          fcParts.push(`[0:v]${mainChain}[vout]`);
+          fcParts.push(`[0:v]${mainChain}[${preMagnifyLabel}]`);
         }
       }
 
@@ -1130,6 +1178,51 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
         fcParts.push(`[0:a]${afParts.join(',')}[_afout]`);
         fcParts.push(`aevalsrc=random(0)*${amp}:s=${sr}[_noise]`);
         fcParts.push(`[_afout][_noise]amix=inputs=2:duration=first:dropout_transition=0[aout]`);
+      }
+
+      // ── Feature 20: Magnifying Glass — time-ranged spotlight zoom ──────────
+      if (needsMagnify && hasOriginalVideo) {
+        let magnifyInput = '_pre_magnify';
+        parsedMagnifyZones.forEach((zone, idx) => {
+          const isLast = idx === parsedMagnifyZones.length - 1;
+          const magnifyOut = isLast ? 'vout' : `_mg_out_${idx}`;
+
+          const vw = Math.max(parseInt(zone.videoWidth) || videoWidth || 1920, 4);
+          const vh = Math.max(parseInt(zone.videoHeight) || videoHeight || 1080, 4);
+          const outW = vw % 2 === 0 ? vw : vw - 1;
+          const outH = vh % 2 === 0 ? vh : vh - 1;
+
+          const xPx = Math.max(0, Math.round((parseFloat(zone.xPct) / 100) * vw));
+          const yPx = Math.max(0, Math.round((parseFloat(zone.yPct) / 100) * vh));
+          let wPx = Math.round((parseFloat(zone.wPct) / 100) * vw);
+          let hPx = Math.round((parseFloat(zone.hPct) / 100) * vh);
+          wPx = Math.max(4, wPx % 2 === 0 ? wPx : wPx - 1);
+          hPx = Math.max(4, hPx % 2 === 0 ? hPx : hPx - 1);
+          const safeX = Math.min(xPx, outW - wPx);
+          const safeY = Math.min(yPx, outH - hPx);
+
+          const ts = Math.max(0, parseFloat(zone.startTime) || 0).toFixed(3);
+          const te = Math.max(parseFloat(ts) + 0.1, parseFloat(zone.endTime) || 1).toFixed(3);
+          const blur = Math.min(Math.max(parseInt(zone.blurStrength) || 20, 5), 60);
+
+          const base = `_mg_base_${idx}`;
+          const src  = `_mg_src_${idx}`;
+          const bg   = `_mg_bg_${idx}`;
+          const fg   = `_mg_fg_${idx}`;
+          const blurred = `_mg_blurred_${idx}`;
+          const zoomed  = `_mg_zoomed_${idx}`;
+          const effect  = `_mg_effect_${idx}`;
+
+          fcParts.push(`[${magnifyInput}]split=2[${base}][${src}]`);
+          fcParts.push(`[${src}]split=2[${bg}][${fg}]`);
+          fcParts.push(`[${bg}]boxblur=luma_radius=${blur}:luma_power=2[${blurred}]`);
+          fcParts.push(`[${fg}]crop=${wPx}:${hPx}:${safeX}:${safeY},scale=${outW}:${outH}:flags=lanczos[${zoomed}]`);
+          fcParts.push(`[${blurred}][${zoomed}]overlay=0:0:enable='between(t,${ts},${te})'[${effect}]`);
+          fcParts.push(`[${base}][${effect}]overlay=0:0:enable='between(t,${ts},${te})'[${magnifyOut}]`);
+
+          magnifyInput = magnifyOut;
+        });
+        console.log(`[Processor] Magnify: ${parsedMagnifyZones.length} zone(s) injected into filter graph`);
       }
 
       cmd.complexFilter(fcParts.join(';'));
@@ -1178,12 +1271,12 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
     if (pipeline === 'macos') {
       cmd
         .videoCodec('h264_videotoolbox')
-        .outputOptions('-b:v', '6000k', '-maxrate', '9000k', '-bufsize', '4000k', '-allow_sw', '1', '-threads', '1');
+        .outputOptions('-b:v', '6000k', '-maxrate', '9000k', '-bufsize', '4000k', '-allow_sw', '1');
     } else if (pipeline === 'nvenc') {
       console.log('[Processor] Encoding with h264_nvenc (NVIDIA GPU)');
       cmd
         .videoCodec('h264_nvenc')
-        .outputOptions('-preset', 'p1', '-rc', 'vbr', '-cq', '23', '-threads', '1');
+        .outputOptions('-preset', 'p4', '-rc', 'vbr', '-cq', '19');
     } else if (pipeline === 'vaapi') {
       console.log(`[Processor] GPU detected: h264_vaapi`);
       console.log(`[Processor] Selected encoder: VAAPI`);
@@ -1192,20 +1285,20 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
       console.log(`[Processor] Filter chain:\n${vfParts.join('\n')}`);
       console.log(`[Processor] Using GPU pipeline`);
       cmd
-        .videoCodec('h264_vaapi')
-        .outputOptions('-threads', '1');
+        .videoCodec('h264_vaapi');
     } else if (pipeline === 'cpu') {
       console.log('[Processor] GPU unavailable\n[Processor] Falling back to libx264');
       cmd
         .videoCodec('libx264')
-        .outputOptions('-crf', '22', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-threads', '1');
+        // Using preset 'veryfast' to prioritize speed over mathematically perfect compression
+        .outputOptions('-crf', '18', '-preset', 'veryfast', '-pix_fmt', 'yuv420p');
     } else if (pipeline === 'copy') {
       console.log('[Processor] Smart bypass enabled: Copying video stream instead of re-encoding');
       cmd.videoCodec('copy');
     }
 
-    // Explicitly use the fastest scaler algorithm for any auto-inserted format conversions
-    cmd.outputOptions('-sws_flags', 'fast_bilinear');
+    // Explicitly use bicubic scaler algorithm for better quality on format conversions and scaling
+    cmd.outputOptions('-sws_flags', 'bicubic');
 
     const needsAudioEncode = afParts.length > 0 || audioMode === 'mix'
       || (audioMode === 'replace' && hasExternalAudio)
@@ -1229,7 +1322,11 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
       const safeRemuxFmt = SAFE_FORMATS[remuxFormat.toLowerCase()];
       if (safeRemuxFmt) {
         finalFmt = safeRemuxFmt;
-        console.log(`[Processor] Container re-mux: output format overridden to '${safeRemuxFmt}'`);
+        // Update outputPath extension to match the container
+        const dir = path.dirname(outputPath);
+        const name = path.basename(outputPath, path.extname(outputPath));
+        outputPath = path.join(dir, `${name}.${remuxFormat.toLowerCase()}`);
+        console.log(`[Processor] Container re-mux: output format overridden to '${safeRemuxFmt}' and ext to '.${remuxFormat.toLowerCase()}'`);
       } else {
         console.warn(`[Processor] Unknown remux format '${remuxFormat}', keeping original.`);
       }
@@ -1316,17 +1413,18 @@ async function processFile(job) {
     }
   }
 
+  let finalOutputPath = outputPath;
   try {
     if (isVideo && mode === 'transform') {
-      await transformVideo(id, inputPath, outputPath, transformOptions, job.updateProgress, cachedProbe);
+      finalOutputPath = await transformVideo(id, inputPath, finalOutputPath, transformOptions, job.updateProgress, cachedProbe);
     } else if (isVideo) {
       // Default: fast metadata-only mode (stream-copy)
-      await replaceVideoMetadata(id, inputPath, outputPath, customMeta, job.updateProgress, outputExt);
+      finalOutputPath = await replaceVideoMetadata(id, inputPath, finalOutputPath, customMeta, job.updateProgress, outputExt);
     } else if (isJpeg) {
-      await stripJpegMetadata(inputPath, outputPath);  // Fix 1: now async
+      await stripJpegMetadata(inputPath, finalOutputPath);  // Fix 1: now async
       if (typeof job.updateProgress === 'function') job.updateProgress(100);
     } else {
-      copyFile(inputPath, outputPath);
+      copyFile(inputPath, finalOutputPath);
       if (typeof job.updateProgress === 'function') job.updateProgress(100);
     }
   } catch (err) {
@@ -1341,7 +1439,7 @@ async function processFile(job) {
     }
   }
 
-  return outputPath;
+  return finalOutputPath;
 }
 
 module.exports = { processFile, cancelProcessing };
