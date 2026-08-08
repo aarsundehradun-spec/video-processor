@@ -1190,8 +1190,10 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
         let hPx = Math.round((parseFloat(magnifyCrop.height || magnifyCrop.h) / 100) * vh);
         wPx = Math.max(4, wPx % 2 === 0 ? wPx : wPx - 1);
         hPx = Math.max(4, hPx % 2 === 0 ? hPx : hPx - 1);
-        const safeX = Math.min(xPx, outW - wPx);
-        const safeY = Math.min(yPx, outH - hPx);
+        wPx = Math.min(wPx, outW);
+        hPx = Math.min(hPx, outH);
+        const safeX = Math.max(0, Math.min(xPx, outW - wPx));
+        const safeY = Math.max(0, Math.min(yPx, outH - hPx));
 
         const ts = Math.max(0, parseFloat(magnifyStart) || 0).toFixed(3);
         const te = magnifyEnd ? Math.max(parseFloat(ts) + 0.1, parseFloat(magnifyEnd)).toFixed(3) : '999999';
