@@ -1199,18 +1199,24 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
         const te = magnifyEnd ? Math.max(parseFloat(ts) + 0.1, parseFloat(magnifyEnd)).toFixed(3) : '999999';
         const blur = Math.min(Math.max(parseInt(magnifyBlur) || 20, 5), 60);
         
-        // Scale the cropped region by the zoom factor
-        const zoom = parseFloat(magnifyZoom) || 2.0;
-        let newW = Math.round(wPx * zoom);
-        let newH = Math.round(hPx * zoom);
-        newW = newW % 2 === 0 ? newW : newW - 1;
-        newH = newH % 2 === 0 ? newH : newH - 1;
+        // Target dimensions (the size of the drawn box, also the output size of the lens)
+        const zoom = Math.max(1.0, parseFloat(magnifyZoom) || 2.0);
         
-        // Center the scaled lens over the original box
+        // We crop a smaller area from the center of the drawn box to zoom in
+        let innerW = Math.round(wPx / zoom);
+        let innerH = Math.round(hPx / zoom);
+        
+        // Ensure even dimensions
+        innerW = Math.max(4, innerW % 2 === 0 ? innerW : innerW - 1);
+        innerH = Math.max(4, innerH % 2 === 0 ? innerH : innerH - 1);
+        
+        // Center of the drawn box
         const cx = safeX + (wPx / 2);
         const cy = safeY + (hPx / 2);
-        const overlayX = Math.round(cx - (newW / 2));
-        const overlayY = Math.round(cy - (newH / 2));
+        
+        // Top-left of the inner crop
+        const innerX = Math.round(cx - (innerW / 2));
+        const innerY = Math.round(cy - (innerH / 2));
         
         let timeGate = magnifyEnd ? `:enable='between(t,${ts},${te})'` : '';
 
@@ -1226,8 +1232,9 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
         fcParts.push(`[${magnifyInput}]split=2[${base}][${src}]`);
         fcParts.push(`[${src}]split=2[${bg}][${fg}]`);
         fcParts.push(`[${bg}]boxblur=luma_radius=${blur}:luma_power=2[${blurred}]`);
-        fcParts.push(`[${fg}]crop=${wPx}:${hPx}:${safeX}:${safeY},scale=${newW}:${newH}:flags=lanczos[${zoomed}]`);
-        fcParts.push(`[${blurred}][${zoomed}]overlay=${overlayX}:${overlayY}${timeGate}[${effect}]`);
+        // Crop the smaller inner region and scale it up to the size of the drawn box
+        fcParts.push(`[${fg}]crop=${innerW}:${innerH}:${innerX}:${innerY},scale=${wPx}:${hPx}:flags=lanczos[${zoomed}]`);
+        fcParts.push(`[${blurred}][${zoomed}]overlay=${safeX}:${safeY}${timeGate}[${effect}]`);
         fcParts.push(`[${base}][${effect}]overlay=0:0${timeGate}[${magnifyOut}]`);
         
         console.log(`[Processor] Magnify injected into filter graph`);
