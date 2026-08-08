@@ -1195,8 +1195,13 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
         const safeX = Math.max(0, Math.min(xPx, outW - wPx));
         const safeY = Math.max(0, Math.min(yPx, outH - hPx));
 
-        const ts = Math.max(0, parseFloat(magnifyStart) || 0).toFixed(3);
-        const te = magnifyEnd ? Math.max(parseFloat(ts) + 0.1, parseFloat(magnifyEnd)).toFixed(3) : '999999';
+        const trimOffset = (trimStart !== null && trimStart !== '' && !isNaN(parseFloat(trimStart))) ? parseFloat(trimStart) : 0;
+        const tsRaw = Math.max(0, (parseFloat(magnifyStart) || 0) - trimOffset);
+        const ts = tsRaw.toFixed(3);
+        let teRaw = magnifyEnd ? Math.max(tsRaw + 0.1, parseFloat(magnifyEnd) - trimOffset) : null;
+        if (teRaw !== null && teRaw < 0) teRaw = 0;
+        const te = teRaw !== null ? teRaw.toFixed(3) : '999999';
+        
         const blur = Math.min(Math.max(parseInt(magnifyBlur) || 20, 5), 60);
         
         // Target dimensions (the size of the drawn box, also the output size of the lens)
