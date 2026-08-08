@@ -539,7 +539,11 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
 
       // ── Feature 20: Magnifying Glass ───────────────────────────────────────
       magnifyEnabled = false,
-      magnifyZones: magnifyZonesRaw = [],
+      magnifyCrop = null,
+      magnifyZoom = 2.0,
+      magnifyBlur = 20,
+      magnifyStart = 0,
+      magnifyEnd = null,
 
       splitOverlayVideoPath = null,
     } = options || {};
@@ -606,16 +610,7 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
     const hasAiTracker = aiTrackerAssPaths.length > 0;
 
     // ── Feature 20: Magnifying Glass — parse zones ─────────────────────────
-    const parsedMagnifyZones = (() => {
-      try {
-        const raw = Array.isArray(magnifyZonesRaw) ? magnifyZonesRaw
-          : (typeof magnifyZonesRaw === 'string' ? JSON.parse(magnifyZonesRaw) : []);
-        return raw.filter(z => z && parseFloat(z.wPct) > 0 && parseFloat(z.hPct) > 0
-          && parseFloat(z.endTime) > parseFloat(z.startTime));
-      } catch { return []; }
-    })();
-    const needsMagnify = (magnifyEnabled === true || magnifyEnabled === 'true')
-      && parsedMagnifyZones.length > 0;
+    const needsMagnify = (magnifyEnabled === true || magnifyEnabled === 'true') && magnifyCrop != null;
     
     const overlays = (options && options.overlaysEnabled && options.overlaysData) ? options.overlaysData : [];
     const hasOverlays = overlays.length > 0;
@@ -1183,46 +1178,57 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
       // ── Feature 20: Magnifying Glass — time-ranged spotlight zoom ──────────
       if (needsMagnify && hasOriginalVideo) {
         let magnifyInput = '_pre_magnify';
-        parsedMagnifyZones.forEach((zone, idx) => {
-          const isLast = idx === parsedMagnifyZones.length - 1;
-          const magnifyOut = isLast ? 'vout' : `_mg_out_${idx}`;
+        
+        const vw = Math.max(videoWidth || 1920, 4);
+        const vh = Math.max(videoHeight || 1080, 4);
+        const outW = vw % 2 === 0 ? vw : vw - 1;
+        const outH = vh % 2 === 0 ? vh : vh - 1;
 
-          const vw = Math.max(parseInt(zone.videoWidth) || videoWidth || 1920, 4);
-          const vh = Math.max(parseInt(zone.videoHeight) || videoHeight || 1080, 4);
-          const outW = vw % 2 === 0 ? vw : vw - 1;
-          const outH = vh % 2 === 0 ? vh : vh - 1;
+        const xPx = Math.max(0, Math.round((parseFloat(magnifyCrop.x) / 100) * vw));
+        const yPx = Math.max(0, Math.round((parseFloat(magnifyCrop.y) / 100) * vh));
+        let wPx = Math.round((parseFloat(magnifyCrop.width || magnifyCrop.w) / 100) * vw);
+        let hPx = Math.round((parseFloat(magnifyCrop.height || magnifyCrop.h) / 100) * vh);
+        wPx = Math.max(4, wPx % 2 === 0 ? wPx : wPx - 1);
+        hPx = Math.max(4, hPx % 2 === 0 ? hPx : hPx - 1);
+        const safeX = Math.min(xPx, outW - wPx);
+        const safeY = Math.min(yPx, outH - hPx);
 
-          const xPx = Math.max(0, Math.round((parseFloat(zone.xPct) / 100) * vw));
-          const yPx = Math.max(0, Math.round((parseFloat(zone.yPct) / 100) * vh));
-          let wPx = Math.round((parseFloat(zone.wPct) / 100) * vw);
-          let hPx = Math.round((parseFloat(zone.hPct) / 100) * vh);
-          wPx = Math.max(4, wPx % 2 === 0 ? wPx : wPx - 1);
-          hPx = Math.max(4, hPx % 2 === 0 ? hPx : hPx - 1);
-          const safeX = Math.min(xPx, outW - wPx);
-          const safeY = Math.min(yPx, outH - hPx);
+        const ts = Math.max(0, parseFloat(magnifyStart) || 0).toFixed(3);
+        const te = magnifyEnd ? Math.max(parseFloat(ts) + 0.1, parseFloat(magnifyEnd)).toFixed(3) : '999999';
+        const blur = Math.min(Math.max(parseInt(magnifyBlur) || 20, 5), 60);
+        
+        // Scale the cropped region by the zoom factor
+        const zoom = parseFloat(magnifyZoom) || 2.0;
+        let newW = Math.round(wPx * zoom);
+        let newH = Math.round(hPx * zoom);
+        newW = newW % 2 === 0 ? newW : newW - 1;
+        newH = newH % 2 === 0 ? newH : newH - 1;
+        
+        // Center the scaled lens over the original box
+        const cx = safeX + (wPx / 2);
+        const cy = safeY + (hPx / 2);
+        const overlayX = Math.round(cx - (newW / 2));
+        const overlayY = Math.round(cy - (newH / 2));
+        
+        let timeGate = magnifyEnd ? `:enable='between(t,${ts},${te})'` : '';
 
-          const ts = Math.max(0, parseFloat(zone.startTime) || 0).toFixed(3);
-          const te = Math.max(parseFloat(ts) + 0.1, parseFloat(zone.endTime) || 1).toFixed(3);
-          const blur = Math.min(Math.max(parseInt(zone.blurStrength) || 20, 5), 60);
+        const base = `_mg_base`;
+        const src  = `_mg_src`;
+        const bg   = `_mg_bg`;
+        const fg   = `_mg_fg`;
+        const blurred = `_mg_blurred`;
+        const zoomed  = `_mg_zoomed`;
+        const effect  = `_mg_effect`;
+        const magnifyOut = 'vout';
 
-          const base = `_mg_base_${idx}`;
-          const src  = `_mg_src_${idx}`;
-          const bg   = `_mg_bg_${idx}`;
-          const fg   = `_mg_fg_${idx}`;
-          const blurred = `_mg_blurred_${idx}`;
-          const zoomed  = `_mg_zoomed_${idx}`;
-          const effect  = `_mg_effect_${idx}`;
-
-          fcParts.push(`[${magnifyInput}]split=2[${base}][${src}]`);
-          fcParts.push(`[${src}]split=2[${bg}][${fg}]`);
-          fcParts.push(`[${bg}]boxblur=luma_radius=${blur}:luma_power=2[${blurred}]`);
-          fcParts.push(`[${fg}]crop=${wPx}:${hPx}:${safeX}:${safeY},scale=${outW}:${outH}:flags=lanczos[${zoomed}]`);
-          fcParts.push(`[${blurred}][${zoomed}]overlay=0:0:enable='between(t,${ts},${te})'[${effect}]`);
-          fcParts.push(`[${base}][${effect}]overlay=0:0:enable='between(t,${ts},${te})'[${magnifyOut}]`);
-
-          magnifyInput = magnifyOut;
-        });
-        console.log(`[Processor] Magnify: ${parsedMagnifyZones.length} zone(s) injected into filter graph`);
+        fcParts.push(`[${magnifyInput}]split=2[${base}][${src}]`);
+        fcParts.push(`[${src}]split=2[${bg}][${fg}]`);
+        fcParts.push(`[${bg}]boxblur=luma_radius=${blur}:luma_power=2[${blurred}]`);
+        fcParts.push(`[${fg}]crop=${wPx}:${hPx}:${safeX}:${safeY},scale=${newW}:${newH}:flags=lanczos[${zoomed}]`);
+        fcParts.push(`[${blurred}][${zoomed}]overlay=${overlayX}:${overlayY}${timeGate}[${effect}]`);
+        fcParts.push(`[${base}][${effect}]overlay=0:0${timeGate}[${magnifyOut}]`);
+        
+        console.log(`[Processor] Magnify injected into filter graph`);
       }
 
       cmd.complexFilter(fcParts.join(';'));
