@@ -1177,7 +1177,10 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
 
       // ── Feature 20: Magnifying Glass — time-ranged spotlight zoom ──────────
       if (needsMagnify && hasOriginalVideo) {
-        let magnifyInput = '_pre_magnify';
+        // CRITICAL ARCHITECTURE:
+        // The magnify effect must split the RAW [0:v] BEFORE any vfParts are applied.
+        // This ensures _mg_base remains sharp (only receiving necessary encoding filters).
+        // Previous bug: split happened after smartblur/grain were already baked in.
         
         const vw = Math.max(videoWidth || 1920, 4);
         const vh = Math.max(videoHeight || 1080, 4);
@@ -1202,47 +1205,49 @@ async function transformVideo(jobId, inputPath, outputPath, options, updateProgr
         if (teRaw !== null && teRaw < 0) teRaw = 0;
         const te = teRaw !== null ? teRaw.toFixed(3) : '999999';
         
-        const blur = Math.min(Math.max(parseInt(magnifyBlur) || 20, 5), 60);
-        
-        // Target dimensions (the size of the drawn box, also the output size of the lens)
+        const feather = Math.max(0, Math.min(parseInt(magnifyBlur) || 0, 100));
         const zoom = Math.max(1.0, parseFloat(magnifyZoom) || 2.0);
         
-        // We crop a smaller area from the center of the drawn box to zoom in
+        // Crop a smaller region centered on the drawn box, then scale it up
         let innerW = Math.round(wPx / zoom);
         let innerH = Math.round(hPx / zoom);
-        
-        // Ensure even dimensions
         innerW = Math.max(4, innerW % 2 === 0 ? innerW : innerW - 1);
         innerH = Math.max(4, innerH % 2 === 0 ? innerH : innerH - 1);
         
-        // Center of the drawn box
         const cx = safeX + (wPx / 2);
         const cy = safeY + (hPx / 2);
-        
-        // Top-left of the inner crop
-        const innerX = Math.round(cx - (innerW / 2));
-        const innerY = Math.round(cy - (innerH / 2));
+        let innerX = Math.max(0, Math.round(cx - (innerW / 2)));
+        let innerY = Math.max(0, Math.round(cy - (innerH / 2)));
+        // Clamp so crop doesn't exceed video bounds
+        innerX = Math.min(innerX, outW - innerW);
+        innerY = Math.min(innerY, outH - innerH);
         
         let timeGate = magnifyEnd ? `:enable='between(t,${ts},${te})'` : '';
 
-        const base = `_mg_base`;
-        const src  = `_mg_src`;
-        const bg   = `_mg_bg`;
-        const fg   = `_mg_fg`;
-        const blurred = `_mg_blurred`;
-        const zoomed  = `_mg_zoomed`;
-        const effect  = `_mg_effect`;
-        const magnifyOut = 'vout';
+        // Build the alpha expression for the circular mask
+        let alphaExpr;
+        if (feather === 0) {
+           alphaExpr = 'if(lt(hypot(X-W/2,Y-H/2),min(W/2,H/2)),255,0)';
+        } else {
+           const ff = (feather / 100).toFixed(2);
+           alphaExpr = 'if(lt(hypot(X-W/2,Y-H/2),min(W/2,H/2)*(1-' + ff + ')),255,if(gt(hypot(X-W/2,Y-H/2),min(W/2,H/2)),0,255*(min(W/2,H/2)-hypot(X-W/2,Y-H/2))/(min(W/2,H/2)*' + ff + ')))';
+        }
 
-        fcParts.push(`[${magnifyInput}]split=2[${base}][${src}]`);
-        fcParts.push(`[${src}]split=2[${bg}][${fg}]`);
-        fcParts.push(`[${bg}]boxblur=luma_radius=${blur}:luma_power=2[${blurred}]`);
-        // Crop the smaller inner region and scale it up to the size of the drawn box
-        fcParts.push(`[${fg}]crop=${innerW}:${innerH}:${innerX}:${innerY},scale=${wPx}:${hPx}:flags=lanczos[${zoomed}]`);
-        fcParts.push(`[${blurred}][${zoomed}]overlay=${safeX}:${safeY}${timeGate}[${effect}]`);
-        fcParts.push(`[${base}][${effect}]overlay=0:0${timeGate}[${magnifyOut}]`);
+        // The zoom branch: crop inner region → scale up → sharpen → apply circular alpha mask and a 6px red circle border
+        fcParts.push(`[_pre_magnify]split=2[_mg_base][_mg_fg]`);
+        fcParts.push(`[_mg_fg]crop=${innerW}:${innerH}:${innerX}:${innerY},scale=${wPx}:${hPx}:flags=lanczos,unsharp=5:5:0.8:5:5:0.0,format=rgba,geq=r='if(between(hypot(X-W/2,Y-H/2),min(W/2,H/2)-6,min(W/2,H/2)),255,p(X,Y))':g='if(between(hypot(X-W/2,Y-H/2),min(W/2,H/2)-6,min(W/2,H/2)),0,p(X,Y))':b='if(between(hypot(X-W/2,Y-H/2),min(W/2,H/2)-6,min(W/2,H/2)),0,p(X,Y))':a='${alphaExpr}'[_mg_zoomed]`);
+        fcParts.push(`[_mg_base][_mg_zoomed]overlay=${safeX}:${safeY}${timeGate}[vout]`);
         
-        console.log(`[Processor] Magnify injected into filter graph`);
+        console.log(`[Processor] ── Magnify Debug ──────────────────────────────`);
+        console.log(`[Processor] Video: ${vw}x${vh}, Output: ${outW}x${outH}`);
+        console.log(`[Processor] Crop input: x=${magnifyCrop.x}% y=${magnifyCrop.y}% w=${magnifyCrop.width || magnifyCrop.w}% h=${magnifyCrop.height || magnifyCrop.h}%`);
+        console.log(`[Processor] Pixel box: x=${safeX} y=${safeY} w=${wPx} h=${hPx}`);
+        console.log(`[Processor] Center: cx=${cx} cy=${cy}`);
+        console.log(`[Processor] Inner crop: x=${innerX} y=${innerY} w=${innerW} h=${innerH}`);
+        console.log(`[Processor] Zoom: ${zoom}x, Feather: ${feather}`);
+        console.log(`[Processor] Alpha expr: ${alphaExpr}`);
+        console.log(`[Processor] Time gate: ${timeGate || 'ENTIRE VIDEO'}`);
+        console.log(`[Processor] ───────────────────────────────────────────────`);
       }
 
       cmd.complexFilter(fcParts.join(';'));
